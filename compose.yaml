@@ -1,0 +1,33 @@
+name: samsaku
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: samsaku
+      POSTGRES_DB: samsaku
+      POSTGRES_PASSWORD: ${LOCAL_DB_PASSWORD:?Set LOCAL_DB_PASSWORD in .env}
+    volumes:
+      - ledger:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U samsaku -d samsaku"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      SAMSAKU_ENV: development
+      DATABASE_URL: postgresql+psycopg://samsaku:${LOCAL_DB_PASSWORD}@db:5432/samsaku
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      PORT: "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports: ["127.0.0.1:8000:8000"]
+  web:
+    build: ./web
+    depends_on: [api]
+    ports: ["127.0.0.1:3000:80"]
+volumes:
+  ledger:

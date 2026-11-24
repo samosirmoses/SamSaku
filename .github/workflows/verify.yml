@@ -1,0 +1,72 @@
+name: Verify SamSaku
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  application:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: samsaku
+          POSTGRES_USER: samsaku
+          POSTGRES_PASSWORD: localtest
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 4s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://samsaku:localtest@localhost:5432/samsaku
+      SAMSAKU_TEST_POSTGRES: postgresql+psycopg://samsaku:localtest@localhost:5432/samsaku
+      SAMSAKU_ENV: development
+      SAMSAKU_DEV_TOKEN: localtest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client-16 gnupg tesseract-ocr tesseract-ocr-ind libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-dejavu-core
+      - run: pip install -r requirements-dev.txt && alembic upgrade head && python -m pytest -q
+        working-directory: backend
+      - run: node --test connectors/gmail/tests/sync.test.cjs
+      - name: Exercise encrypted backup and restore on disposable databases
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: samsaku
+          PGPASSWORD: localtest
+          PGDATABASE: samsaku
+        run: |
+          set -eu
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          archive="$RUNNER_TEMP/samsaku-test.gpg"
+          passphrase="$(openssl rand -hex 32)"
+          printf '%s\n' "$passphrase" | python ops/backup.py save "$archive" --passphrase-stdin
+          createdb samsaku_restore_check
+          printf '%s\n' "$passphrase" | PGDATABASE=samsaku_restore_check python ops/backup.py restore "$archive" --passphrase-stdin
+          source_count="$(psql -XAtc 'select count(*) from account_entries')"
+          restored_count="$(PGDATABASE=samsaku_restore_check psql -XAtc 'select count(*) from account_entries')"
+          test "$source_count" -gt 0
+          test "$source_count" = "$restored_count"
+      - run: npm install --no-fund && npm run typecheck && npm run build
+        working-directory: web
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - run: gradle --no-daemon :app:assembleDebug
+        working-directory: android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: samsaku-android-debug
+          path: android/app/build/outputs/apk/debug/*.apk
