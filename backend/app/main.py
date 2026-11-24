@@ -63,13 +63,11 @@ app = FastAPI(title="SamSaku", version="1.1.0")
 @app.on_event("startup")
 def _on_startup():
     start_telegram_poller_if_enabled()
+_cors_raw = os.getenv("CORS_ORIGINS", "*").strip()
+_cors_list = ["*"] if _cors_raw == "*" else [v.strip() for v in _cors_raw.split(",") if v.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        v.strip()
-        for v in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
-        if v.strip()
-    ],
+    allow_origins=_cors_list or ["*"],
     allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "X-Dev-Token", "Idempotency-Key"],
 )

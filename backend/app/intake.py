@@ -48,6 +48,8 @@ def draft(db, owner_id, source, text, event_date):
             payload["category_id"] = cat_id
         return payload, False
     path = os.getenv("SAMSAKU_PARSER_RULES")
+    if not path and Path("/srv/parser-rules.local.json").is_file():
+        path = "/srv/parser-rules.local.json"
     if not path:
         return {}, False
     rules = json.loads(Path(path).read_text(encoding="utf-8-sig"))

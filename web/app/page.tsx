@@ -26,7 +26,7 @@ import {
     Wallet,
     X,
 } from "lucide-react";
-import { allowDev, del, get, post, supabase } from "../lib/api";
+import { allowDev, del, get, getSavedToken, post, setSavedToken, supabase } from "../lib/api";
 import {
     type Account,
     type Budget,
@@ -158,14 +158,14 @@ export default function Page() {
         let alive = true;
         const listen = sb?.auth.onAuthStateChange((_ev, session) => {
             if (alive) {
-                const ok = !!session || (allowDev() && !!sessionStorage.getItem("samsaku-dev"));
+                const ok = !!session || (allowDev() && !!getSavedToken());
                 setAuthed(ok);
                 setDemoMode(!ok);
                 setReady(true);
             }
         });
         if (!sb) {
-            const ok = allowDev() && !!sessionStorage.getItem("samsaku-dev");
+            const ok = allowDev() && !!getSavedToken();
             setAuthed(ok);
             setDemoMode(!ok);
             setReady(true);
@@ -295,7 +295,7 @@ export default function Page() {
             setNotice(error.message);
             return;
         }
-        sessionStorage.removeItem("samsaku-dev");
+        setSavedToken("");
         setDoc(null);
         setRev(null);
         setFilter("");
@@ -1051,9 +1051,32 @@ function Login({
     onLogout: () => void;
     onLocal: () => void;
 }) {
+    const [email, setEmail] = useState("");
+    const [password, setPassword] = useState("");
     const [key, setKey] = useState("");
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
+
+    async function emailLogin(e: React.FormEvent) {
+        e.preventDefault();
+        setBusy(true);
+        setError("");
+        try {
+            const sb = supabase();
+            if (!sb) throw new Error("Koneksi Supabase belum dikonfigurasi.");
+            const { error } = await sb.auth.signInWithPassword({
+                email: email.trim(),
+                password,
+            });
+            if (error) throw error;
+            onLocal();
+        } catch (e) {
+            setError(e instanceof Error ? e.message : "Email atau password tidak sesuai.");
+        } finally {
+            setBusy(false);
+        }
+    }
+
     async function google() {
         setBusy(true);
         setError("");
@@ -1074,12 +1097,12 @@ function Login({
         setError("");
         setBusy(true);
         try {
-            sessionStorage.setItem("samsaku-dev", key);
+            setSavedToken(key.trim());
             await get("/accounts");
             onLocal();
         } catch (e) {
-            sessionStorage.removeItem("samsaku-dev");
-            setError(e instanceof Error ? e.message : "Login gagal.");
+            setSavedToken("");
+            setError(e instanceof Error ? e.message : "Password/Token akses tidak sesuai.");
         } finally {
             setBusy(false);
         }
@@ -1094,29 +1117,51 @@ function Login({
     ) : (
         <div className="form">
             <p className="muted">
-                Saat ini Anda menggunakan <b>Sandbox Interaktif</b> (data tersimpan di browser). Masukkan token
-                server lokal dari file <code>.env</code> (<code>SAMSAKU_DEV_TOKEN</code>) untuk menyinkronkan ke
-                database PostgreSQL.
+                Masuk ke akun pemilik untuk menyinkronkan data dengan database PostgreSQL.
             </p>
             {supabase() && (
-                <button disabled={busy} className="btn primary" onClick={google}>
-                    <LogIn size={16} />
-                    Masuk dengan Google
-                </button>
+                <>
+                    <form className="form" onSubmit={emailLogin}>
+                        <Field label="Email pemilik">
+                            <input
+                                type="email"
+                                required
+                                value={email}
+                                onChange={e => setEmail(e.target.value)}
+                                placeholder="nama@email.com"
+                            />
+                        </Field>
+                        <Field label="Password">
+                            <input
+                                type="password"
+                                required
+                                value={password}
+                                onChange={e => setPassword(e.target.value)}
+                                placeholder="••••••••"
+                            />
+                        </Field>
+                        <button type="submit" disabled={busy || !email || !password} className="btn primary">
+                            <LogIn size={16} /> Masuk dengan Email
+                        </button>
+                    </form>
+                    <button type="button" disabled={busy} className="btn" onClick={google}>
+                        <LogIn size={16} /> Masuk dengan Google (Opsional)
+                    </button>
+                </>
             )}
             {allowDev() && (
                 <>
-                    <Field label="Token server lokal (SAMSAKU_DEV_TOKEN)">
+                    <Field label="Password / Token Akses Server (SAMSAKU_DEV_TOKEN)">
                         <input
                             type="password"
                             value={key}
                             autoComplete="off"
                             onChange={e => setKey(e.target.value)}
-                            placeholder="Masukkan token dari .env"
+                            placeholder="Masukkan password/token akses Anda"
                         />
                     </Field>
                     <button disabled={busy || !key} className="btn primary" onClick={local}>
-                        Hubungkan server PostgreSQL
+                        Hubungkan Server SamSaku
                     </button>
                 </>
             )}

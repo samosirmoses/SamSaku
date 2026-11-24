@@ -1,4 +1,5 @@
 """Telegram's HTTPS webhook and local development long-polling bridge."""
+import hashlib
 import logging
 import os
 import threading
@@ -20,6 +21,16 @@ from .schemas import EventIn, TransactionIn
 router = APIRouter()
 MAX_PHOTO = 5 * 1024 * 1024
 logger = logging.getLogger("samsaku.telegram")
+
+
+def _effective_webhook_secret() -> str:
+    explicit = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+    if explicit:
+        return explicit
+    bot_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    if bot_token:
+        return hashlib.sha256(bot_token.encode()).hexdigest()[:32]
+    return ""
 
 
 def reply(chat_id, text, buttons=None):
@@ -86,8 +97,10 @@ def confirm(db, owner_id, callback, chat_id):
 
 @router.post("/v1/webhooks/telegram")
 def receive(update: dict, db=Depends(get_db), x_telegram_bot_api_secret_token: str = Header("")):
-    if not secret_matches(x_telegram_bot_api_secret_token, "TELEGRAM_WEBHOOK_SECRET"):
-        raise HTTPException(403, "Webhook tidak dikenali.")
+    expected = _effective_webhook_secret()
+    if not expected or x_telegram_bot_api_secret_token != expected:
+        if not secret_matches(x_telegram_bot_api_secret_token, "TELEGRAM_WEBHOOK_SECRET"):
+            raise HTTPException(403, "Webhook tidak dikenali.")
     callback = update.get("callback_query") or {}
     msg = callback.get("message") or update.get("message") or {}
     chat = msg.get("chat", {})
@@ -150,18 +163,35 @@ def receive(update: dict, db=Depends(get_db), x_telegram_bot_api_secret_token: s
 
 def _poll_loop():
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    secret = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+    secret = _effective_webhook_secret()
     if not token or not secret:
         return
     api = f"https://api.telegram.org/bot{token}"
-    offset = 0
+    public_url = (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("PUBLIC_API_URL") or "").strip().rstrip("/")
     with httpx.Client(timeout=30) as http:
+        if public_url.startswith("https://"):
+            try:
+                res = http.post(
+                    f"{api}/setWebhook",
+                    json={
+                        "url": f"{public_url}/v1/webhooks/telegram",
+                        "secret_token": secret,
+                        "allowed_updates": ["message", "callback_query"],
+                    },
+                )
+                if res.status_code == 200:
+                    logger.info("Telegram webhook auto-registered to %s/v1/webhooks/telegram", public_url)
+                    return
+            except Exception as exc:
+                logger.warning("Auto-webhook registration failed, falling back to polling: %s", exc)
+
         try:
             http.post(f"{api}/deleteWebhook", json={"drop_pending_updates": False})
-            logger.info("Telegram local long-polling active (no public HTTPS tunnel required).")
+            logger.info("Telegram long-polling active.")
         except Exception as exc:
-            logger.warning("Failed to clear Telegram webhook for local polling: %s", exc)
+            logger.warning("Failed to clear Telegram webhook for polling: %s", exc)
 
+        offset = 0
         while True:
             try:
                 res = http.get(f"{api}/getUpdates", params={"timeout": 20, "offset": offset})
@@ -190,7 +220,7 @@ def _poll_loop():
 
 
 def start_telegram_poller_if_enabled():
-    if os.environ.get("SAMSAKU_TELEGRAM_POLL") == "1" and os.environ.get("TELEGRAM_BOT_TOKEN"):
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("SAMSAKU_ENV") != "test":
         t = threading.Thread(target=_poll_loop, daemon=True, name="telegram-poller")
         t.start()
 

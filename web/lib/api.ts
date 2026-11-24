@@ -14,11 +14,23 @@ export function supabase() {
 export const isLoopback = (s: string) => ["127.0.0.1", "localhost", "[::1]"].includes(s);
 
 export function allowDev() {
-    return (
-        typeof window !== "undefined" &&
-        isLoopback(location.hostname) &&
-        isLoopback(new URL(endpoint, location.href).hostname)
-    );
+    return typeof window !== "undefined";
+}
+
+export function getSavedToken(): string {
+    if (typeof window === "undefined") return "";
+    return sessionStorage.getItem("samsaku-dev") || localStorage.getItem("samsaku-dev") || "";
+}
+
+export function setSavedToken(token: string) {
+    if (typeof window === "undefined") return;
+    if (token) {
+        sessionStorage.setItem("samsaku-dev", token);
+        localStorage.setItem("samsaku-dev", token);
+    } else {
+        sessionStorage.removeItem("samsaku-dev");
+        localStorage.removeItem("samsaku-dev");
+    }
 }
 
 export async function request(path: string, init: RequestInit = {}, asBlob = false): Promise<unknown> {
@@ -30,7 +42,7 @@ export async function request(path: string, init: RequestInit = {}, asBlob = fal
         headers.set("Authorization", "Bearer " + token);
         hasAuth = true;
     } else if (allowDev()) {
-        const key = sessionStorage.getItem("samsaku-dev");
+        const key = getSavedToken();
         if (key) {
             headers.set("X-Dev-Token", key);
             hasAuth = true;

@@ -9,8 +9,8 @@ from jwt import PyJWKClient
 
 
 def configured_owner() -> str:
-    raw = os.getenv("OWNER_ID", "")
-    if not raw and os.getenv("SAMSAKU_ENV") == "development":
+    raw = os.getenv("OWNER_ID", "").strip()
+    if not raw:
         return "00000000-0000-4000-8000-000000000001"
     try:
         return str(UUID(raw))
@@ -30,7 +30,7 @@ def jwks(url: str):
 
 def owner(authorization: str = Header(""), x_dev_token: str = Header("")) -> str:
     user_id = configured_owner()
-    if os.getenv("SAMSAKU_ENV") == "development" and secret_matches(x_dev_token, "SAMSAKU_DEV_TOKEN"):
+    if (os.getenv("SAMSAKU_ENV") != "production" or not os.getenv("OWNER_ID")) and secret_matches(x_dev_token, "SAMSAKU_DEV_TOKEN"):
         return user_id
     base = os.getenv("SUPABASE_URL", "").rstrip("/")
     if not authorization.startswith("Bearer ") or not base.startswith("https://"):
