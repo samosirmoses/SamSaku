@@ -14,7 +14,7 @@ from .auth import configured_owner, owner, secret_matches
 from .db import get_db, lock_owner
 from .jobs import FileJob, get_job, load_file, now, purge_file, store_file
 from .models import Evidence, Transaction
-from .ocr import create_receipt, process_receipt
+from .ocr import create_receipt, process_receipt, scan_receipt_auto
 from .reports import csv_bytes, report_csv, report_pdf
 from .schemas import TransactionIn
 from .xlsx import WorkbookError
@@ -219,6 +219,12 @@ def report(format: Literal["csv","pdf"], start: date, end: date, details: bool=T
     report = ledger.summary(db, user, start, end)
     data = report_csv(report) if format == "csv" else report_pdf(report, details)
     return attachment(data, f"SamSaku_{start}_{end}.{format}", "text/csv" if format=="csv" else "application/pdf")
+
+
+@router.post("/receipts/scan")
+def scan_receipt(file: UploadFile = File(), user=Depends(owner), db: Session = Depends(get_db)):
+    lock_owner(db, user)
+    return scan_receipt_auto(db, user, file.filename or "struk.jpg", read_upload(file))
 
 
 @router.post("/receipts")

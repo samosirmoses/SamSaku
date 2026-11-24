@@ -23,11 +23,33 @@ class AccountIn(BaseModel):
         return self
 
 
+class AccountEdit(BaseModel):
+    code: Code | None = None
+    name: Name | None = None
+    kind: str | None = Field(default=None, max_length=32)
+    opening_date: Date | None = None
+    opening_balance: int | None = Field(default=None, ge=-9_000_000_000_000_000, le=9_000_000_000_000_000)
+    clear_opening: bool = False
+
+    @model_validator(mode="after")
+    def require_anchor(self):
+        if not self.clear_opening and (self.opening_date is None) != (self.opening_balance is None):
+            raise ValueError("Isi saldo dan tanggal awal bersama-sama.")
+        return self
+
+
 class CategoryIn(BaseModel):
     name: Name
     code: Code | None = None
     kind: Literal["income", "expense"]
     parent_id: str | None = None
+
+
+class CategoryEdit(BaseModel):
+    name: Name | None = None
+    kind: Literal["income", "expense"] | None = None
+    parent_id: str | None = None
+    archived: bool | None = None
 
 
 class SplitIn(BaseModel):
@@ -48,6 +70,17 @@ class TransactionIn(BaseModel):
     original_id: str | None = None
     splits: list[SplitIn] = Field(default_factory=list, max_length=100)
     source_ref: str | None = Field(default=None, max_length=512)
+
+
+class BudgetIn(BaseModel):
+    category_id: str
+    amount: Money
+
+
+class SettingsIn(BaseModel):
+    monthly_start_day: int = Field(default=1, ge=1, le=31)
+    weekly_start_day: int = Field(default=1, ge=0, le=6)
+    default_account_id: str | None = None
 
 
 class RuleIn(BaseModel):

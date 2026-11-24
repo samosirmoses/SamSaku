@@ -1,5 +1,8 @@
-"""Telegram's HTTPS webhook. All money movements require owner confirmation."""
+"""Telegram's HTTPS webhook and local development long-polling bridge."""
+import logging
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -8,7 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 
 from .auth import configured_owner, secret_matches
-from .db import get_db, lock_owner
+from .db import SessionLocal, get_db, lock_owner
 from .intake import ingest
 from .ledger import owned, post_transaction
 from .models import Account, Evidence
@@ -16,6 +19,7 @@ from .schemas import EventIn, TransactionIn
 
 router = APIRouter()
 MAX_PHOTO = 5 * 1024 * 1024
+logger = logging.getLogger("samsaku.telegram")
 
 
 def reply(chat_id, text, buttons=None):
@@ -142,3 +146,51 @@ def receive(update: dict, db=Depends(get_db), x_telegram_bot_api_secret_token: s
     else:
         detail += "\nPeriksa draf di menu Tinjauan."
     return reply(chat_id, detail, buttons)
+
+
+def _poll_loop():
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    secret = (os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+    if not token or not secret:
+        return
+    api = f"https://api.telegram.org/bot{token}"
+    offset = 0
+    with httpx.Client(timeout=30) as http:
+        try:
+            http.post(f"{api}/deleteWebhook", json={"drop_pending_updates": False})
+            logger.info("Telegram local long-polling active (no public HTTPS tunnel required).")
+        except Exception as exc:
+            logger.warning("Failed to clear Telegram webhook for local polling: %s", exc)
+
+        while True:
+            try:
+                res = http.get(f"{api}/getUpdates", params={"timeout": 20, "offset": offset})
+                if res.status_code != 200:
+                    time.sleep(5)
+                    continue
+                updates = res.json().get("result") or []
+                for upd in updates:
+                    offset = max(offset, int(upd["update_id"]) + 1)
+                    try:
+                        with SessionLocal() as db:
+                            action = receive(upd, db=db, x_telegram_bot_api_secret_token=secret)
+                        if isinstance(action, dict) and action.get("method"):
+                            method = action["method"]
+                            payload = {k: v for k, v in action.items() if k != "method"}
+                            http.post(f"{api}/{method}", json=payload)
+                            if upd.get("callback_query") and method != "answerCallbackQuery":
+                                http.post(
+                                    f"{api}/answerCallbackQuery",
+                                    json={"callback_query_id": upd["callback_query"]["id"]},
+                                )
+                    except Exception as inner_exc:
+                        logger.warning("Error handling Telegram update %s: %s", upd.get("update_id"), inner_exc)
+            except Exception:
+                time.sleep(4)
+
+
+def start_telegram_poller_if_enabled():
+    if os.environ.get("SAMSAKU_TELEGRAM_POLL") == "1" and os.environ.get("TELEGRAM_BOT_TOKEN"):
+        t = threading.Thread(target=_poll_loop, daemon=True, name="telegram-poller")
+        t.start()
+

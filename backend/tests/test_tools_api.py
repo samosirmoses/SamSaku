@@ -81,3 +81,13 @@ def test_receipt_chooses_total_and_handles_ambiguity():
     txt = "Kopi Senja\n12/11/2026\nSubtotal Rp40.000\nTOTAL Rp42.000\nTunai Rp50.000\nKembali Rp8.000"
     assert extract(txt) == {"amount":42000,"date":"2026-11-12","merchant":"Kopi Senja","amount_options":[42000]}
     assert extract(txt + "\nTotal Rp43.000")["amount"] is None
+    from app.receipt_text import infer_category
+    cats = [
+        {"id": "c-food", "name": "Makan & minum", "kind": "expense", "archived": False},
+        {"id": "c-shop", "name": "Belanja", "kind": "expense", "archived": False},
+        {"id": "c-trans", "name": "Transportasi", "kind": "expense", "archived": False},
+    ]
+    assert infer_category(cats, [], txt, "Kopi Senja") == ("c-food", "Makan & minum")
+    assert infer_category(cats, [], "Indomaret\n24 Nov 2026\nTotal Belanja Rp 55.000", "Indomaret") == ("c-shop", "Belanja")
+    assert infer_category(cats, [], "SPBU Pertamina\nPertamax Rp 150.000", "SPBU Pertamina") == ("c-trans", "Transportasi")
+

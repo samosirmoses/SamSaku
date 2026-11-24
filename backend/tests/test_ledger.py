@@ -7,11 +7,25 @@ from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import Session
 
 from app.db import Base
-from app.ledger import post_transaction, balance, summary
+from app.ledger import (
+    balance,
+    delete_account,
+    delete_budget,
+    delete_category,
+    delete_transaction,
+    edit_account,
+    get_settings,
+    list_budgets,
+    post_transaction,
+    summary,
+    update_settings,
+    update_transaction,
+    upsert_budget,
+)
 from app.intake import ingest
 from app.models import Account, Category, Transaction, Scheme, Reserve, Evidence
 from app.planning import plan_allocation
-from app.schemas import ApplyIn, EventIn, TransactionIn
+from app.schemas import AccountEdit, ApplyIn, BudgetIn, EventIn, SettingsIn, TransactionIn
 
 OWNER = "u1"
 DAY = date(2026, 1, 25)
@@ -98,3 +112,56 @@ def test_reference_cannot_be_reused_for_other_amount(db):
     with pytest.raises(HTTPException) as err:
         post(db,"expense",40000,source_ref="123")
     assert err.value.status_code == 409
+
+
+def test_crud_wallet_transaction_category_budget_and_settings(db):
+    # Settings
+    assert get_settings(db, OWNER)["monthly_start_day"] == 1
+    saved_settings = update_settings(
+        db, OWNER, SettingsIn(monthly_start_day=25, weekly_start_day=0, default_account_id="BCA")
+    )
+    assert saved_settings == {"monthly_start_day": 25, "weekly_start_day": 0, "default_account_id": "BCA"}
+
+    # Budget upsert & status
+    upsert_budget(db, OWNER, BudgetIn(category_id="FOOD", amount=100000))
+    tx = post(db, "expense", 85000, category_id="FOOD", description="Makan siang")
+    budgets = list_budgets(db, OWNER, DAY, DAY)
+    assert len(budgets) == 1 and budgets[0]["spent"] == 85000 and budgets[0]["status"] == "warning"
+
+    # Edit transaction
+    update_transaction(
+        db,
+        OWNER,
+        tx.id,
+        TransactionIn(date=DAY, kind="expense", account_id="BCA", amount=120000, category_id="FOOD", description="Makan malam"),
+    )
+    assert balance(db, db.get(Account, "BCA")) == -120000
+    budgets = list_budgets(db, OWNER, DAY, DAY)
+    assert budgets[0]["spent"] == 120000 and budgets[0]["status"] == "over"
+
+    # Edit account
+    edit_account(
+        db,
+        OWNER,
+        "BCA",
+        AccountEdit(name="BCA Utama", opening_date=DAY, opening_balance=500000),
+    )
+    assert db.get(Account, "BCA").name == "BCA Utama"
+    assert balance(db, db.get(Account, "BCA")) == 380000
+
+    # Delete account with transfer_to moves transactions to GOPAY
+    delete_account(db, OWNER, "BCA", transfer_to="GOPAY")
+    assert db.get(Account, "BCA") is None
+    assert balance(db, db.get(Account, "GOPAY")) == -120000
+    assert get_settings(db, OWNER)["default_account_id"] == "GOPAY"
+
+    # Delete transaction restores balance
+    delete_transaction(db, OWNER, tx.id)
+    assert balance(db, db.get(Account, "GOPAY")) == 0
+
+    # Delete budget & category
+    delete_budget(db, OWNER, budgets[0]["id"])
+    assert list_budgets(db, OWNER, DAY, DAY) == []
+    delete_category(db, OWNER, "FOOD")
+    assert db.get(Category, "FOOD") is None
+

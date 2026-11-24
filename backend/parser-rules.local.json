@@ -1,0 +1,26 @@
+[
+  {
+    "source": "bca",
+    "account_code": "BCA",
+    "kind": "expense",
+    "verified": true,
+    "pattern": "^.*?Status\\s*:\\s*Berhasil.*?Tanggal(?:\\s+Transaksi)?\\s*:\\s*(?P<date>(?:\\d{1,2}\\s+[A-Za-z]{3,9}\\s+\\d{4}|\\d{2}/\\d{2}/\\d{4}))(?:\\s+\\d{2}:\\d{2}:\\d{2})?.*?(?:Pembayaran\\s+Ke|Merchant|Nama\\s+Penerima|Tujuan)\\s*:\\s*(?P<merchant>[^\\r\\n]+).*?(?:Total\\s+Bayar|Nominal|Jumlah)\\s*:\\s*(?:IDR|Rp)\\.?\\s*(?P<amount>[0-9.,]+).*?(?:Nomor|No\\.?)\\s*Referensi\\s*:\\s*(?P<ref>[A-Za-z0-9-]+).*$",
+    "date_format": "%d %b %Y"
+  },
+  {
+    "source": "bca",
+    "account_code": "BCA",
+    "kind": "expense",
+    "verified": true,
+    "pattern": "^.*?Status\\s*:\\s*Berhasil.*?Tanggal(?:\\s+Transaksi)?\\s*:\\s*(?P<date>(?:\\d{1,2}\\s+[A-Za-z]{3,9}\\s+\\d{4}|\\d{2}/\\d{2}/\\d{4}))(?:\\s+\\d{2}:\\d{2}:\\d{2})?.*?(?:Total\\s+Bayar|Nominal|Jumlah)\\s*:\\s*(?:IDR|Rp)\\.?\\s*(?P<amount>[0-9.,]+).*?(?:Pembayaran\\s+Ke|Merchant|Nama\\s+Penerima|Tujuan)\\s*:\\s*(?P<merchant>[^\\r\\n]+).*?(?:Nomor|No\\.?)\\s*Referensi\\s*:\\s*(?P<ref>[A-Za-z0-9-]+).*$",
+    "date_format": "%d/%m/%Y"
+  },
+  {
+    "source": "gopay",
+    "account_code": "GOPAY",
+    "kind": "expense",
+    "verified": true,
+    "use_delivery_date": true,
+    "pattern": "^Pembayaran Rp(?P<amount>[0-9.]+) di (?P<merchant>.+) berhasil\\. ID: (?P<ref>[A-Za-z0-9-]+)$"
+  }
+]

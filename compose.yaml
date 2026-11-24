@@ -18,15 +18,19 @@ services:
     env_file: .env
     environment:
       SAMSAKU_ENV: development
+      SAMSAKU_TELEGRAM_POLL: "1"
       DATABASE_URL: postgresql+psycopg://samsaku:${LOCAL_DB_PASSWORD}@db:5432/samsaku
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       PORT: "8000"
     depends_on:
       db:
         condition: service_healthy
-    ports: ["127.0.0.1:8000:8000"]
+    ports: ["127.0.0.1:${SAMSAKU_API_PORT:-8000}:8000"]
   web:
-    build: ./web
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:${SAMSAKU_API_PORT:-8000}/v1
     depends_on: [api]
     ports: ["127.0.0.1:3000:80"]
 volumes:

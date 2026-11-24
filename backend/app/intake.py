@@ -11,14 +11,15 @@ from sqlalchemy import select
 from .calculations import rupiah
 from .db import lock_owner
 from .ledger import post_transaction
-from .models import Account, Evidence, Transaction
+from .models import Account, Category, Evidence, Transaction
+from .receipt_text import _extract_date, infer_category
 from .schemas import EventIn, TransactionIn
 
 JAKARTA = ZoneInfo("Asia/Jakarta")
 
 
 def redact(text):
-    text = re.sub(r"(?im)((?:rekening|account|kartu|card)(?:\s+(?:asal|tujuan|number|no\.?))?\s*[:#-]?\s*)[\d -]{7,25}(\d{4})\b",
+    text = re.sub(r"(?im)((?:rekening|account|kartu|card|pan)(?:\s+(?:asal|tujuan|number|no\.?))?\s*[:#-]?\s*)[\d -]{7,25}(\d{4})\b",
                   r"\1****\2", text)
     return re.sub(r"(?i)((?:kode\s+)?(?:OTP|PIN|password)\s*[:#-]?\s*)\d{4,8}\b", r"\1[disamarkan]", text)
 
@@ -28,10 +29,24 @@ def draft(db, owner_id, source, text, event_date):
     if source == "telegram":
         amounts = re.findall(r"(?<!\w)(?:rp\s*)?\d[\d.]*(?:,00)?(?:rb|jt|k)?(?!\w)", text.lower())
         account = next((a for a in accounts if a.name.lower() in text.lower() or a.code.lower() in text.lower()), None)
-        return {"date": event_date.isoformat(), "description": text[:500],
-                "kind": "income" if re.search(r"\b(gaji|bonus|pemasukan)\b", text, re.I) else "expense",
-                "account_id": account.id if account else None,
-                "amount": rupiah(amounts[0]) if len(amounts) == 1 else None}, False
+        kind = "income" if re.search(r"\b(gaji|bonus|pemasukan)\b", text, re.I) else "expense"
+        cat_id = None
+        if kind == "expense":
+            cats = [
+                {"id": c.id, "name": c.name, "kind": c.kind, "archived": c.archived}
+                for c in db.scalars(select(Category).where(Category.owner_id == owner_id)).all()
+            ]
+            cat_id, _ = infer_category(cats, [], text, text)
+        payload = {
+            "date": event_date.isoformat(),
+            "description": text[:500],
+            "kind": kind,
+            "account_id": account.id if account else None,
+            "amount": rupiah(amounts[0]) if len(amounts) == 1 else None,
+        }
+        if cat_id:
+            payload["category_id"] = cat_id
+        return payload, False
     path = os.getenv("SAMSAKU_PARSER_RULES")
     if not path:
         return {}, False
@@ -47,13 +62,27 @@ def draft(db, owner_id, source, text, event_date):
         account = next((a for a in accounts if a.code == rule["account_code"]), None)
         ref = (groups.get("ref") or "").strip()[:480]
         parsed_date = None
-        if groups.get("date") and rule.get("date_format"):
-            try:
-                parsed_date = datetime.strptime(groups["date"], rule["date_format"]).date()
-            except ValueError:
-                pass
+        if groups.get("date"):
+            if rule.get("date_format"):
+                try:
+                    parsed_date = datetime.strptime(groups["date"].strip(), rule["date_format"]).date()
+                except ValueError:
+                    pass
+            if parsed_date is None:
+                iso_date = _extract_date(groups["date"])
+                if iso_date:
+                    parsed_date = datetime.strptime(iso_date, "%Y-%m-%d").date()
+        merchant_desc = redact((groups.get("merchant") or text).strip())[:500]
         result = {"kind": rule["kind"], "amount": amount, "account_id": account.id if account else None,
-                  "date": (parsed_date or event_date).isoformat(), "description": redact(groups.get("merchant") or text)[:500]}
+                  "date": (parsed_date or event_date).isoformat(), "description": merchant_desc}
+        if rule["kind"] == "expense":
+            cats = [
+                {"id": c.id, "name": c.name, "kind": c.kind, "archived": c.archived}
+                for c in db.scalars(select(Category).where(Category.owner_id == owner_id)).all()
+            ]
+            cat_id, _ = infer_category(cats, [], text, merchant_desc)
+            if cat_id:
+                result["category_id"] = cat_id
         # An explicit success-only template and provider reference are required for automatic posting.
         date_ok = parsed_date is not None or (not groups.get("date") and rule.get("use_delivery_date") is True)
         automatic = bool(account and amount and amount <= 9_000_000_000_000_000 and ref and date_ok and rule.get("verified") is True

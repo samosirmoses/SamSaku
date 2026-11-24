@@ -5,10 +5,17 @@ import re
 
 
 def rupiah(raw):
-    value = raw.lower().strip().removeprefix("rp").strip()
+    value = raw.lower().strip()
+    has_idr = value.startswith("idr")
+    value = value.removeprefix("rp").removeprefix("idr").strip()
     match = re.fullmatch(r"(\d{1,12})(k|rb|jt)", value)
     if match:
         return int(match[1]) * (1_000_000 if match[2] == "jt" else 1_000)
+    # Handle English/myBCA format like '32,000.00' or '1,250,000.00' or 'IDR 32000.00'
+    if re.fullmatch(r"\d{1,3}(,\d{3})+(\.00)?", value):
+        return int(value.removesuffix(".00").replace(",", ""))
+    if has_idr and re.fullmatch(r"\d{1,16}\.00", value):
+        return int(value.removesuffix(".00"))
     value = value.removesuffix(",00")
     if not re.fullmatch(r"(\d{1,3}(\.\d{3})+|\d{1,16})", value):
         return None

@@ -147,3 +147,19 @@ class ReserveMovement(Owned, Base):
     transaction_id: Mapped[str] = mapped_column(ForeignKey("transactions.id"), index=True)
     category_id: Mapped[str] = mapped_column(ForeignKey("categories.id"))
     amount: Mapped[int] = mapped_column(BigInteger)
+
+
+class UserSettings(Owned, Base):
+    __tablename__ = "user_settings"
+    __table_args__ = (UniqueConstraint("owner_id"),)
+    monthly_start_day: Mapped[int] = mapped_column(Integer, default=1)
+    weekly_start_day: Mapped[int] = mapped_column(Integer, default=1)
+    default_account_id: Mapped[str | None] = mapped_column(ForeignKey("accounts.id"), nullable=True)
+
+
+class Budget(Owned, Base):
+    __tablename__ = "budgets"
+    __table_args__ = (UniqueConstraint("owner_id", "category_id"),)
+    category_id: Mapped[str] = mapped_column(ForeignKey("categories.id"), index=True)
+    amount: Mapped[int] = mapped_column(BigInteger)
+

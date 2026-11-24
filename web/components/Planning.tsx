@@ -1,181 +1,355 @@
 "use client";
 import { useState, type FormEvent } from "react";
-import { Plus, Trash2, Layers3, Target } from "lucide-react";
-import { post } from "../lib/api";
-import { type Data, type Rule, type Scheme, money, today } from "../lib/domain";
-import { Field, ErrorNote } from "./ui";
-const initial = (): Rule => ({ name: "", mode: "percent", value: 0, category_ids: [] });
-export function SchemeForm({ data, done }: {
-    data: Data;
-    done: () => void;
-}) {
-    const [rules, setRules] = useState<Rule[]>([initial()]), [busy, setBusy] = useState(false), [error, setError] = useState("");
-    function edit(i: number, patch: Partial<Rule>) { setRules(prev => prev.map((r, n) => n === i ? { ...r, ...patch } : r)); }
-    async function submit(e: FormEvent<HTMLFormElement>) { e.preventDefault(); setBusy(true); setError(""); const f = new FormData(e.currentTarget); try {
-        await post("/schemes", { name: f.get("name"), cycle_day: Number(f.get("cycle")), rules: rules.map(r => ({ ...r, name: r.name.trim() })) });
-        done();
-    }
-    catch (e) {
-        setError(e instanceof Error ? e.message : "Gagal menyimpan skema.");
-    }
-    finally {
-        setBusy(false);
-    } }
-    return <form className="form" onSubmit={submit}>
-      <Field label="Nama skema">
-        <input required name="name" placeholder="Rencana gajian"/>
-      </Field>
-      <Field label="Tanggal awal siklus bulanan">
-        <input name="cycle" type="number" min="1" max="31" defaultValue="1" required/>
-      </Field>
-      {rules.map((r, i) => <fieldset className="rule" key={i}>
-        <legend>Pos {i + 1}</legend>
-        <Field label="Nama pos">
-          <input required value={r.name} onChange={e => edit(i, { name: e.target.value })}/>
-        </Field>
-        <div className="form-pair">
-          <Field label="Aturan">
-            <select value={r.mode} onChange={e => edit(i, { mode: e.target.value as Rule["mode"], value: 0 })}>
-              <option value="fixed">Nominal tetap</option>
-              <option value="percent">Persentase</option>
-              <option value="remainder">Seluruh sisa</option>
-            </select>
-          </Field>
-          {r.mode !== "remainder" && <Field label={r.mode === "fixed" ? "Nominal (Rp)" : "Persen (%)"}>
-            <input type="number" min="0" max={r.mode === "percent" ? 100 : undefined} step="1" value={r.value} onChange={e => edit(i, { value: Number(e.target.value) })}/>
-          </Field>}
-        </div>
-        <Field label="Kategori pengeluaran terkait">
-          <select multiple value={r.category_ids} onChange={e => edit(i, { category_ids: Array.from((e.currentTarget as HTMLSelectElement).selectedOptions).map(o => o.value) })}>
-            {data.categories.filter(c => c.kind === "expense").map(c => <option key={c.id} value={c.id}>
-              {c.name}
-            </option>)}
-          </select>
-        </Field>
-        <Field label="Target terkait">
-          <select value={r.goal_id || ""} onChange={e => edit(i, { goal_id: e.target.value || undefined })}>
-            <option value="">Tanpa target</option>
-            {data.goals.map(g => <option value={g.id} key={g.id}>
-              {g.name}
-            </option>)}
-          </select>
-        </Field>
-        <label className="check"><input type="checkbox" checked={!!r.rollover} onChange={e => edit(i, { rollover: e.target.checked })}/>Bawa sisa ke siklus berikutnya</label>
-        {rules.length > 1 && <button type="button" className="text-btn" onClick={() => setRules(rules.filter((_, j) => j !== i))}><Trash2 size={14}/> Hapus pos</button>}
-      </fieldset>)}
-      <button type="button" className="btn" onClick={() => setRules([...rules, initial()])}><Plus size={15}/>Tambah pos</button>
-      <ErrorNote message={error}/>
-      <button className="btn primary" disabled={busy}>Simpan skema</button>
-    </form>;
+import {
+    AlertTriangle,
+    ArrowRight,
+    CheckCircle2,
+    Pencil,
+    Plus,
+    ShieldAlert,
+    Sparkles,
+    Trash2,
+    Wallet,
+} from "lucide-react";
+import { del, post } from "../lib/api";
+import { type Budget, type Data, expense, money, period } from "../lib/domain";
+import { CatIcon, ErrorNote } from "./ui";
+
+function formatDots(val: string | number): string {
+    const digits = String(val).replace(/\D/g, "");
+    if (!digits) return "";
+    return Number(digits).toLocaleString("id-ID");
 }
-type Result = {
-    basis: number;
-    items: {
-        name: string;
-        amount: number;
-    }[];
-    remaining: number;
-    revision: string;
-    applicable: boolean;
-};
-export function Allocate({ scheme, data, done }: {
-    scheme: Scheme;
+
+function parseDigits(val: string): number {
+    const digits = val.replace(/\D/g, "");
+    return digits ? Number(digits) : 0;
+}
+
+export function BudgetsView({
+    data,
+    month,
+    onSelectCategory,
+    onDone,
+}: {
     data: Data;
-    done: () => void;
+    month: string;
+    onSelectCategory?: (name: string) => void;
+    onDone: () => void;
 }) {
-    const [ids, setIds] = useState<string[]>([]), [date, setDate] = useState(today()), [res, setRes] = useState<Result | null>(null), [key, setKey] = useState(""), [err, setErr] = useState(""), [busy, setBusy] = useState(false);
-    const incomes = data.transactions.filter(t => t.kind === "income");
-    async function run(apply: boolean) { setBusy(true); setErr(""); try {
-        const request_id = apply ? key : crypto.randomUUID();
-        const r = await post<Result>("/schemes/" + scheme.id + "/" + (apply ? "apply" : "preview"), { income_ids: ids, request_id, date, revision: apply ? res?.revision : undefined });
-        if (apply)
-            done();
-        else {
-            setKey(request_id);
-            setRes(r);
+    const expenseCategories = data.categories.filter(c => c.kind === "expense" && !c.archived);
+    const budgets = data.budgets || [];
+    const [catId, setCatId] = useState<string>(expenseCategories[0]?.id || "");
+    const [amount, setAmount] = useState<string>("");
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState("");
+
+    const startDay = data.settings?.monthly_start_day || 1;
+    const range = period(month, startDay);
+    const endMs = new Date(range.end + "T23:59:59").getTime();
+    const nowMs = Date.now();
+    const remainingDays = Math.max(1, Math.ceil((endMs - nowMs) / 86400000));
+
+    const totalBudget = budgets.reduce((sum, b) => sum + b.amount, 0);
+    const totalSpent = budgets.reduce((sum, b) => sum + b.spent, 0);
+    const totalRemaining = totalBudget - totalSpent;
+    const totalPct = totalBudget > 0 ? Math.round((100 * totalSpent) / totalBudget) : 0;
+    const safeDailyTotal = totalRemaining > 0 ? Math.floor(totalRemaining / remainingDays) : 0;
+
+    const unbudgetedCategories = expenseCategories.filter(c => !budgets.some(b => b.category_id === c.id));
+
+    async function saveBudget(e: FormEvent<HTMLFormElement>) {
+        e.preventDefault();
+        const num = parseDigits(amount);
+        if (!catId || !num || num <= 0) {
+            setError("Pilih kategori pengeluaran dan isi nominal anggaran.");
+            return;
+        }
+        setBusy(true);
+        setError("");
+        try {
+            await post("/budgets", { category_id: catId, amount: num });
+            setAmount("");
+            onDone();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Gagal menyimpan anggaran.");
+        } finally {
+            setBusy(false);
         }
     }
-    catch (e) {
-        setErr(e instanceof Error ? e.message : "Gagal memproses pembagian.");
+
+    async function removeBudget(b: Budget) {
+        setBusy(true);
+        setError("");
+        try {
+            await del("/budgets/" + b.id);
+            onDone();
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Gagal menghapus anggaran.");
+        } finally {
+            setBusy(false);
+        }
     }
-    finally {
-        setBusy(false);
-    } }
-    return <div className="form">
-      <Field label="Tanggal penerapan">
-        <input type="date" value={date} onChange={e => { setDate(e.target.value); setRes(null); }}/>
-      </Field>
-      <h3>Pemasukan yang dibagi</h3>
-      {incomes.length ? incomes.map(t => <label className="check" key={t.id}><input type="checkbox" checked={ids.includes(t.id)} onChange={e => { setIds(e.target.checked ? [...ids, t.id] : ids.filter(x => x !== t.id)); setRes(null); }}/>{t.description || "Pemasukan"} · {money(t.amount)}</label>) : <p className="muted">Belum ada pemasukan pada bulan pilihan.</p>}
-      {res && <div className="paper-totals">
-        <div>
-          <span>Dana siap dibagi</span>
-          <b>
-            {money(res.basis)}
-          </b>
+
+    function selectForEdit(categoryId: string, currentAmount?: number) {
+        setCatId(categoryId);
+        setAmount(currentAmount ? String(currentAmount) : "");
+        window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    return (
+        <div className="stack">
+            <section className="budget-hero card">
+                <div className="budget-hero-grid">
+                    <div>
+                        <small className="muted">Total anggaran bulanan</small>
+                        <h2>{money(totalBudget)}</h2>
+                    </div>
+                    <div>
+                        <small className="muted">Terpakai siklus ini</small>
+                        <h2 className="expense-amt">−{money(totalSpent)}</h2>
+                    </div>
+                    <div>
+                        <small className="muted">
+                            {totalRemaining >= 0 ? "Sisa anggaran" : "Melebihi anggaran"}
+                        </small>
+                        <h2 className={totalRemaining >= 0 ? "income" : "expense-amt"}>
+                            {money(Math.abs(totalRemaining))}
+                        </h2>
+                        {totalRemaining > 0 && (
+                            <small className="safe-daily-pill">
+                                <Sparkles size={12} /> Aman {money(safeDailyTotal)} / hari ({remainingDays} hari tersisa)
+                            </small>
+                        )}
+                    </div>
+                </div>
+                {totalBudget > 0 && (
+                    <div className="bar-line" style={{ marginTop: 14 }}>
+                        <span className="bar-track" style={{ height: 10 }}>
+                            <span
+                                className={
+                                    "bar " +
+                                    (totalPct > 100 ? "bar-over" : totalPct >= 80 ? "bar-warn" : "bar-safe")
+                                }
+                                style={{ width: Math.min(100, Math.max(2, totalPct)) + "%" }}
+                            />
+                        </span>
+                        <small>
+                            <b>{totalPct}%</b> terpakai
+                        </small>
+                    </div>
+                )}
+            </section>
+
+            <div className="two-cols">
+                <section className="card">
+                    <div className="section-title">
+                        <h2>Anggaran per kategori</h2>
+                        <Wallet size={18} />
+                    </div>
+                    {budgets.length ? (
+                        <div className="budget-list">
+                            {budgets.map(b => {
+                                const statusLabel =
+                                    b.status === "over"
+                                        ? "Over-budget"
+                                        : b.status === "warning"
+                                          ? "Hampir habis"
+                                          : "Aman";
+                                const StatusIcon =
+                                    b.status === "over"
+                                        ? ShieldAlert
+                                        : b.status === "warning"
+                                          ? AlertTriangle
+                                          : CheckCircle2;
+                                const catSafeDaily =
+                                    b.remaining > 0 ? Math.floor(b.remaining / remainingDays) : 0;
+
+                                return (
+                                    <div key={b.id} className="budget-card-row">
+                                        <div className="budget-row-top">
+                                            <div className="budget-cat-title">
+                                                <span className="cat-icon">
+                                                    <CatIcon name={b.category_name} />
+                                                </span>
+                                                <div>
+                                                    <strong>{b.category_name}</strong>
+                                                    <span className={"budget-badge " + b.status}>
+                                                        <StatusIcon size={12} /> {statusLabel} ({b.percent}%)
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div className="btns">
+                                                {onSelectCategory && (
+                                                    <button
+                                                        type="button"
+                                                        className="btn sm"
+                                                        title="Lihat transaksi kategori ini"
+                                                        onClick={() => onSelectCategory(b.category_name)}
+                                                    >
+                                                        Transaksi <ArrowRight size={13} />
+                                                    </button>
+                                                )}
+                                                <button
+                                                    type="button"
+                                                    className="icon-btn"
+                                                    title="Ubah anggaran"
+                                                    onClick={() => selectForEdit(b.category_id, b.amount)}
+                                                >
+                                                    <Pencil size={15} />
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="icon-btn"
+                                                    title="Hapus anggaran"
+                                                    disabled={busy}
+                                                    onClick={() => removeBudget(b)}
+                                                >
+                                                    <Trash2 size={15} />
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="bar-line">
+                                            <span className="bar-track" style={{ height: 8 }}>
+                                                <span
+                                                    className={
+                                                        "bar " +
+                                                        (b.status === "over"
+                                                            ? "bar-over"
+                                                            : b.status === "warning"
+                                                              ? "bar-warn"
+                                                              : "bar-safe")
+                                                    }
+                                                    style={{ width: Math.min(100, Math.max(2, b.percent)) + "%" }}
+                                                />
+                                            </span>
+                                        </div>
+
+                                        <div className="budget-row-meta">
+                                            <span>
+                                                Terpakai: <b className="expense-amt">{money(b.spent)}</b> dari{" "}
+                                                <b>{money(b.amount)}</b>
+                                            </span>
+                                            <span className={b.remaining >= 0 ? "income" : "expense-amt"}>
+                                                {b.remaining >= 0
+                                                    ? `Sisa ${money(b.remaining)} (${money(catSafeDaily)}/hr)`
+                                                    : `Lewat ${money(Math.abs(b.remaining))}`}
+                                            </span>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <p className="empty">
+                            Belum ada anggaran kategori. Tetapkan anggaran bulanan di panel samping untuk memantau
+                            pengeluaran.
+                        </p>
+                    )}
+                </section>
+
+                <div className="stack">
+                    <section className="card">
+                        <div className="section-title">
+                            <h2>Atur anggaran kategori</h2>
+                            <Plus size={18} />
+                        </div>
+                        {expenseCategories.length ? (
+                            <form className="form" onSubmit={saveBudget}>
+                                <div className="field">
+                                    <span>Pilih Kategori Pengeluaran</span>
+                                    <div className="cat-chip-grid">
+                                        {expenseCategories.map(c => (
+                                            <button
+                                                type="button"
+                                                key={c.id}
+                                                className={`cat-pick-chip expense ${catId === c.id ? "active" : ""}`}
+                                                onClick={() => {
+                                                    setCatId(c.id);
+                                                    const ex = budgets.find(b => b.category_id === c.id);
+                                                    if (ex) setAmount(String(ex.amount));
+                                                }}
+                                            >
+                                                <CatIcon name={c.name} size={15} />
+                                                <span>{c.name}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="amount-hero-box">
+                                    <span className="amount-hero-label">Batas Anggaran per Siklus Bulan</span>
+                                    <div className="amount-hero-input-row">
+                                        <span className="currency-prefix">Rp</span>
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            required
+                                            aria-label="Batas anggaran per bulan (Rp)"
+                                            value={formatDots(amount)}
+                                            onChange={e => setAmount(e.target.value.replace(/\D/g, ""))}
+                                            placeholder="0"
+                                        />
+                                    </div>
+                                    <div className="quick-nominal-row">
+                                        {[300000, 500000, 1000000, 1500000, 2000000, 3000000].map(preset => (
+                                            <button
+                                                key={preset}
+                                                type="button"
+                                                className="nominal-chip"
+                                                onClick={() => setAmount(String(preset))}
+                                            >
+                                                {preset >= 1000000 ? `${preset / 1000000}jt` : `${preset / 1000}rb`}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <ErrorNote message={error} />
+                                <button type="submit" className="btn primary" disabled={busy}>
+                                    {busy ? "Menyimpan…" : "Simpan anggaran"}
+                                </button>
+                            </form>
+                        ) : (
+                            <p className="empty">Buat kategori pengeluaran di Master data terlebih dahulu.</p>
+                        )}
+                    </section>
+
+                    {unbudgetedCategories.length > 0 && (
+                        <section className="card">
+                            <div className="section-title">
+                                <h2>Kategori belum beranggaran</h2>
+                            </div>
+                            {unbudgetedCategories.map(c => {
+                                const spent = data.transactions
+                                    .filter(t => t.category_id === c.id)
+                                    .reduce((s, t) => s + expense(t), 0);
+                                return (
+                                    <div key={c.id} className="paper-line">
+                                        <span>
+                                            <strong>{c.name}</strong>
+                                            <small>Terpakai siklus ini: {money(spent)}</small>
+                                        </span>
+                                        <button
+                                            type="button"
+                                            className="btn sm"
+                                            onClick={() =>
+                                                selectForEdit(
+                                                    c.id,
+                                                    spent > 0 ? Math.ceil(spent / 100000) * 100000 : 500000
+                                                )
+                                            }
+                                        >
+                                            + Atur anggaran
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                        </section>
+                    )}
+                </div>
+            </div>
         </div>
-        {res.items.map((x, i) => <div key={i}>
-          <span>
-            {x.name}
-          </span>
-          <b>
-            {money(x.amount)}
-          </b>
-        </div>)}
-        <div>
-          <span>Sisa</span>
-          <b>
-            {money(res.remaining)}
-          </b>
-        </div>
-      </div>}
-      <ErrorNote message={err}/>
-      <button disabled={busy || !date || !ids.length || res?.applicable === false} className="btn primary" onClick={() => run(!!res)}>
-        {res ? "Terapkan pembagian" : "Pratinjau pembagian"}
-      </button>
-    </div>;
-}
-export function Plans({ data, newScheme, newGoal, select }: {
-    data: Data;
-    newScheme: () => void;
-    newGoal: () => void;
-    select: (s: Scheme) => void;
-}) {
-    return <div className="two-cols">
-      <section className="card">
-        <div className="section-title">
-          <h2>Skema keuangan</h2>
-          <Layers3 size={18}/>
-        </div>
-        {data.schemes.length ? data.schemes.map(s => <div key={s.id}>
-          <button className="list-action" onClick={() => select(s)}>
-            <strong>
-              {s.name}
-            </strong>
-            <small>Siklus tanggal {s.cycle_day} · {s.rules.length} pos · Bagi pemasukan</small>
-          </button>
-          {s.pots?.map(p => <div key={p.name} className="pot-stats">
-            <strong>
-              {p.name}
-            </strong>
-            <small>Dialokasikan {money(p.allocated)} · Terpakai {money(p.used)} · Sisa {money(p.remaining)}</small>
-          </div>)}
-        </div>) : <p className="empty">Bagi pemasukan ke pos dengan nominal tetap, persentase, atau sisa.</p>}
-        <button className="text-btn" onClick={newScheme}><Plus size={15}/>Buat skema</button>
-      </section>
-      <section className="card">
-        <div className="section-title">
-          <h2>Target tabungan</h2>
-          <Target size={18}/>
-        </div>
-        {data.goals.length ? data.goals.map(g => <div key={g.id} className="goal-row">
-          <h3>
-            {g.name}
-          </h3>
-          <p>{money(g.reserved || 0)} dari {money(g.target)}</p>
-          <progress max={g.target} value={g.reserved || 0}/>
-        </div>) : <p className="empty">Tautkan target ke pos untuk melihat progresnya.</p>}
-        <button className="text-btn" onClick={newGoal}><Plus size={15}/>Buat target</button>
-      </section>
-    </div>;
+    );
 }
