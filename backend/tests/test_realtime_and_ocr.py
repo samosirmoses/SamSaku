@@ -113,3 +113,12 @@ def test_gemini_vision_receipt_parsing_and_formatting(monkeypatch):
         assert parsed["category_hint"] == "Belanja & Kebutuhan"
         assert parsed["engine"] == "gemini"
         assert ocr._format_description(parsed["merchant"], parsed["items"]) == "Indomaret — Susu Ultra, Roti Tawar"
+
+
+def test_parse_positive_int_mybca_and_indonesian_formats():
+    assert ocr._parse_positive_int("IDR 32,000.00") == 32000
+    assert ocr._parse_positive_int("Rp 150.000,00") == 150000
+    assert ocr._parse_positive_int("1,250,000.00") == 1250000
+    assert ocr._parse_positive_int("Rp45.000") == 45000
+    assert ocr._parse_positive_int(32000) == 32000
+    assert ocr._parse_positive_int(32000.0) == 32000

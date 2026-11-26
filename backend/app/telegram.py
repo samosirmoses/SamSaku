@@ -14,7 +14,7 @@ from sqlalchemy import select
 from .auth import configured_owner, secret_matches
 from .db import SessionLocal, get_db, lock_owner
 from .intake import ingest
-from .ledger import owned, post_transaction
+from .ledger import get_settings, owned, post_transaction
 from .models import Account, Evidence
 from .realtime import notify as realtime_notify
 from .schemas import EventIn, TransactionIn
@@ -147,15 +147,28 @@ def receive(update: dict, db=Depends(get_db), x_telegram_bot_api_secret_token: s
         event = owned(db, Evidence, owner_id, result["evidence_id"])
         if event.status != "review":
             return reply(chat_id, "Bukti ini sudah diproses.")
-        parsed = {**parsed, **event.parsed, "kind": "expense", "date": result.get("date") or parsed["date"],
-                  "telegram_update": str(update["update_id"]), "description": result.get("merchant") or event_text}
+        parsed = {
+            **parsed,
+            **event.parsed,
+            "kind": "expense",
+            "date": result.get("date") or parsed["date"],
+            "account_id": parsed.get("account_id") or result.get("account_id") or get_settings(db, owner_id).get("default_account_id"),
+            "telegram_update": str(update["update_id"]),
+            "description": result.get("merchant") or event_text,
+        }
         event.parsed = parsed
         db.commit()
     realtime_notify(owner_id, "telegram:new", "Draf transaksi baru masuk dari Telegram.")
     account = db.scalar(select(Account).where(Account.owner_id == owner_id, Account.id == parsed.get("account_id")))
     amount = parsed.get("amount")
     value = ("Rp" + f"{amount:,}".replace(",", ".")) if isinstance(amount, int) else "Periksa nominal"
-    detail = f"{value} · {account.name if account else 'Pilih dompet'}\n{parsed.get('description', event_text)}"
+    cat_name = parsed.get("category_name")
+    tx_date = parsed.get("date")
+    engine = parsed.get("engine")
+    meta_parts = [p for p in (tx_date, cat_name) if p]
+    meta_line = f"\n{' · '.join(meta_parts)}" if meta_parts else ""
+    engine_line = f"\n({'AI Vision' if engine == 'gemini' else 'OCR Lokal'})" if engine else ""
+    detail = f"{value} · {account.name if account else 'Pilih dompet'}{meta_line}\n{parsed.get('description', event_text)}{engine_line}"
     buttons = [{"text": "Batalkan", "callback_data": "cancel|" + event.id}]
     if amount and account and not parsed.get("candidates"):
         buttons.insert(0, {"text": "Simpan", "callback_data": "save|" + event.id})

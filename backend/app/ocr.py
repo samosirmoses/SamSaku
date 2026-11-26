@@ -14,7 +14,8 @@ from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 from sqlalchemy import select
 
 from .jobs import get_job, load_file, purge_file, store_file
-from .models import Category, Evidence, Transaction
+from .ledger import get_settings
+from .models import Account, Category, Evidence, Transaction
 from .receipt_text import extract, infer_category
 
 JAKARTA = ZoneInfo("Asia/Jakarta")
@@ -70,14 +71,17 @@ def _parse_positive_int(val) -> int | None:
         n = int(round(val))
         return n if 100 <= n <= 1_000_000_000 else None
     if isinstance(val, str):
-        digits = re.sub(r"[^\d]", "", val.split(",")[0] if re.search(r",\d{2}$", val.strip()) else val)
+        s = val.strip()
+        # Strip trailing fractional cents in either Indonesian (,00) or English/myBCA (.00) format
+        s = re.sub(r"[.,]\d{2}$", "", s)
+        digits = re.sub(r"[^\d]", "", s)
         if digits:
             n = int(digits)
             return n if 100 <= n <= 1_000_000_000 else None
     return None
 
 
-def _scan_with_gemini(content: bytes, category_names: list[str]) -> dict | None:
+def _scan_with_gemini(content: bytes, category_names: list[str], account_names: list[str] | None = None) -> dict | None:
     api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not api_key or os.getenv("SAMSAKU_ENV") == "test":
         return None
@@ -87,18 +91,24 @@ def _scan_with_gemini(content: bytes, category_names: list[str]) -> dict | None:
         jpeg_bytes = _prepare_jpeg_for_vision(content)
         b64_img = base64.b64encode(jpeg_bytes).decode("ascii")
         cats_text = ", ".join(category_names) if category_names else "Makan & Minum, Belanja, Transportasi, Lainnya"
+        accs_text = ", ".join(account_names) if account_names else "BCA, Tunai"
         prompt = (
-            "Baca foto struk belanja Indonesia ini dengan teliti lalu kembalikan HANYA JSON valid dengan skema:\n"
-            '{"merchant": string|null, "items": string[], "amount": integer|null, "date": "YYYY-MM-DD"|null, "category": string|null}\n'
+            "Kamu adalah asisten pencatat keuangan pribadi Indonesia. Analisis gambar struk belanja, struk EDC, "
+            "atau screenshot bukti transaksi/QRIS/transfer bank (myBCA, m-BCA, GoPay, OVO, DANA, ShopeePay, dll.) ini.\n"
+            "Kembalikan HANYA JSON valid dengan skema:\n"
+            '{"merchant": string|null, "items": string[], "amount": integer|null, "date": "YYYY-MM-DD"|null, '
+            '"category": string|null, "account": string|null}\n'
             "Aturan ketat:\n"
-            "1. merchant: nama toko/restoran/merchant singkat & bersih (tanpa alamat/PT panjang).\n"
-            "2. items: maksimal 4 nama barang/menu utama yang dibeli secara ringkas (tanpa kode/SKU/harga).\n"
-            "3. amount: TOTAL AKHIR YANG DIBAYAR dalam Rupiah bulat (integer tanpa titik/koma/Rp). "
-            "Cari GRAND TOTAL / TOTAL BAYAR / TOTAL / NETTO / QRIS / EDC / DEBIT. "
-            "JANGAN ambil uang Tunai/Cash diterima atau Kembalian/Change.\n"
-            "4. date: tanggal transaksi pada struk dalam format YYYY-MM-DD (atau null jika tidak ada).\n"
-            f"5. category: pilih SATU nama kategori paling sesuai PERSIS dari daftar ini: [{cats_text}].\n"
-            "Jika gambar bukan struk atau tidak terbaca, isi field yang tidak pasti dengan null."
+            "1. merchant: nama toko/restoran/merchant/penerima transfer yang singkat & bersih. "
+            "Untuk screenshot myBCA/m-BCA/QRIS, ambil nama Merchant atau Penerima/Tujuan (JANGAN isi 'BCA', 'myBCA', 'Berhasil', atau 'Transaksi Berhasil').\n"
+            "2. items: maksimal 4 nama barang/menu/berita transfer singkat (tanpa kode/SKU/harga). Kosongkan [] jika tidak ada rincian item.\n"
+            "3. amount: TOTAL AKHIR YANG DIBAYAR dalam Rupiah bulat sebagai integer murni (tanpa Rp, tanpa titik/koma, TANPA sen). "
+            "PENTING: pada format myBCA/bank seperti 'IDR 32,000.00' atau 'Rp 150.000,00', abaikan '.00' / ',00' sehingga menjadi 32000 atau 150000! "
+            "Pada struk kasir, ambil GRAND TOTAL / TOTAL BAYAR / NETTO / QRIS / EDC / DEBIT (JANGAN ambil uang Tunai/Cash diterima atau Kembalian/Change).\n"
+            "4. date: tanggal transaksi pada struk/bukti dalam format YYYY-MM-DD (atau null jika tidak terbaca).\n"
+            f"5. category: pilih SATU nama kategori paling cocok PERSIS dari daftar ini: [{cats_text}].\n"
+            f"6. account: jika sumber pembayaran/bank/e-wallet terlihat di gambar dan cocok dengan salah satu dompet di daftar [{accs_text}], pilih nama dompet itu PERSIS; jika tidak yakin, isi null.\n"
+            "Jika gambar tidak terbaca, isi field yang tidak pasti dengan null."
         )
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         payload = {
@@ -115,10 +125,10 @@ def _scan_with_gemini(content: bytes, category_names: list[str]) -> dict | None:
                 "responseMimeType": "application/json",
             },
         }
-        with httpx.Client(timeout=22.0) as client:
+        with httpx.Client(timeout=25.0) as client:
             res = client.post(url, params={"key": api_key}, json=payload)
             if res.status_code != 200:
-                logger.warning("Gemini Vision API returned %s: %s", res.status_code, res.text[:200])
+                logger.warning("Gemini Vision API returned %s: %s", res.status_code, res.text[:250])
                 return None
             body = res.json()
         raw_text = (
@@ -130,7 +140,6 @@ def _scan_with_gemini(content: bytes, category_names: list[str]) -> dict | None:
         )
         if not raw_text:
             return None
-        # Strip accidental markdown fences if present
         raw_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.I | re.S).strip()
         data = json.loads(raw_text)
         if not isinstance(data, dict):
@@ -142,6 +151,7 @@ def _scan_with_gemini(content: bytes, category_names: list[str]) -> dict | None:
         amount = _parse_positive_int(data.get("amount"))
         tx_date = _parse_iso_date(data.get("date"))
         cat_hint = str(data.get("category") or "").strip() or None
+        acc_hint = str(data.get("account") or "").strip() or None
         if not merchant and not amount and not items:
             return None
 
@@ -152,6 +162,7 @@ def _scan_with_gemini(content: bytes, category_names: list[str]) -> dict | None:
             "amount_options": [amount] if amount else [],
             "date": tx_date,
             "category_hint": cat_hint,
+            "account_hint": acc_hint,
             "engine": "gemini",
             "raw_text": f"{merchant or ''} {' '.join(items)}".strip(),
         }
@@ -258,9 +269,20 @@ def _analyze_receipt(db, owner_id: str, content: bytes) -> tuple[dict, str]:
             )
         ).all()
     ]
-    ai_res = _scan_with_gemini(content, expense_cat_names)
+    accounts = list(db.scalars(select(Account).where(Account.owner_id == owner_id)).all())
+    account_names = [a.name for a in accounts]
+
+    ai_res = _scan_with_gemini(content, expense_cat_names, account_names)
     if ai_res:
         enriched = _enrich_category(db, owner_id, ai_res, ai_res.get("raw_text", ""))
+        acc_hint = (ai_res.get("account_hint") or "").strip().lower()
+        if acc_hint:
+            matched_acc = next((a for a in accounts if a.name.strip().lower() == acc_hint or a.code.strip().lower() == acc_hint), None)
+            if not matched_acc:
+                matched_acc = next((a for a in accounts if acc_hint in a.name.strip().lower() or a.name.strip().lower() in acc_hint), None)
+            if matched_acc:
+                enriched["account_id"] = matched_acc.id
+                enriched["account_name"] = matched_acc.name
         return enriched, ai_res.get("raw_text", "")
 
     text = _ocr_image_bytes(content)
