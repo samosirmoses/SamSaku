@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
+from .calculations import cycle
 from .db import lock_owner
 from .models import (
     Account,
@@ -676,12 +677,16 @@ def summary(db, owner_id, start: date, end: date):
         pending = pending.where(Evidence.occurred_at >= begin.astimezone(timezone.utc))
     reviews = db.scalar(pending)
 
-    # Calculate previous comparison period safely
+    # Calculate previous comparison period safely (respecting monthly_start_day cycle boundaries)
     span_days = (end - start).days + 1
     prev_summary = None
     if 1 <= span_days <= 370 and start > date(1971, 1, 1):
         prev_end = start - timedelta(days=1)
-        prev_start = prev_end - timedelta(days=span_days - 1)
+        start_day = get_settings(db, owner_id).get("monthly_start_day", 1)
+        if 25 <= span_days <= 35:
+            prev_start, _ = cycle(start_day, prev_end)
+        else:
+            prev_start = prev_end - timedelta(days=span_days - 1)
         prev_summary = _period_totals(db, owner_id, prev_start, prev_end)
 
     return {

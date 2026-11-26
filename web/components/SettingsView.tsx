@@ -3,7 +3,7 @@ import { useState, type FormEvent } from "react";
 import { Calendar, CheckCircle2, Moon, RotateCcw, Settings as SettingsIcon, Sun, Wallet } from "lucide-react";
 import { put } from "../lib/api";
 import { resetDemoStore } from "../lib/demo";
-import { type Data, type Settings, periodRangeLabel, weekdayNames } from "../lib/domain";
+import { type Data, type Settings, cycleMonthForDate, monthLabel, periodRangeLabel, today, weekdayNames } from "../lib/domain";
 import { ErrorNote, Field } from "./ui";
 
 export function SettingsView({
@@ -19,7 +19,7 @@ export function SettingsView({
     demoMode: boolean;
     theme: "light" | "dark";
     onToggleTheme: (t: "light" | "dark") => void;
-    onDone: () => void;
+    onDone: (nextStartDay?: number) => void;
 }) {
     const [monthlyStartDay, setMonthlyStartDay] = useState<number>(data.settings?.monthly_start_day || 1);
     const [weeklyStartDay, setWeeklyStartDay] = useState<number>(data.settings?.weekly_start_day ?? 1);
@@ -41,7 +41,7 @@ export function SettingsView({
         try {
             await put("/settings", payload);
             setSaved(true);
-            onDone();
+            onDone(payload.monthly_start_day);
         } catch (err) {
             setError(err instanceof Error ? err.message : "Gagal menyimpan pengaturan.");
         } finally {
@@ -96,9 +96,11 @@ export function SettingsView({
                         </select>
                     </Field>
                     <p className="muted" style={{ fontSize: 12 }}>
-                        Pratinjau siklus aktif untuk pilihan bulan saat ini:{" "}
-                        <b>{periodRangeLabel(month, monthlyStartDay)}</b>. Seluruh perhitungan Dashboard, Transaksi,
-                        Anggaran, dan Statistik mengikuti rentang tanggal ini.
+                        Pratinjau periode <b>{monthLabel(cycleMonthForDate(today(), monthlyStartDay))}</b>:{" "}
+                        <b>{periodRangeLabel(cycleMonthForDate(today(), monthlyStartDay), monthlyStartDay)}</b>.
+                        {monthlyStartDay >= 15
+                            ? " (Karena mulai tgl >= 15, periode dinamai mengikuti bulan berakhirnya agar sesuai siklus gajian.)"
+                            : " Seluruh perhitungan Dashboard, Transaksi, Anggaran, dan Statistik mengikuti rentang ini."}
                     </p>
 
                     <Field label="Hari pertama mingguan (Weekly Start Date)">
@@ -162,8 +164,8 @@ export function SettingsView({
                         <b>Tanggal {monthlyStartDay}</b>
                     </div>
                     <div className="paper-line">
-                        <span>Rentang periode terpilih</span>
-                        <b>{periodRangeLabel(month, monthlyStartDay)}</b>
+                        <span>Rentang periode aktif</span>
+                        <b>{periodRangeLabel(cycleMonthForDate(today(), monthlyStartDay), monthlyStartDay)}</b>
                     </div>
                     <div className="paper-line">
                         <span>Awal pekan kalender</span>

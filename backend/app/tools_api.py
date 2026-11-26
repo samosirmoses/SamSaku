@@ -15,6 +15,7 @@ from .db import get_db, lock_owner
 from .jobs import FileJob, get_job, load_file, now, purge_file, store_file
 from .models import Evidence, Transaction
 from .ocr import create_receipt, process_receipt, scan_receipt_auto
+from .realtime import notify as realtime_notify
 from .reports import csv_bytes, report_csv, report_pdf
 from .schemas import TransactionIn
 from .xlsx import WorkbookError
@@ -197,6 +198,7 @@ def publish_approved(db, user, job_id):
     job.status = "done"
     db.commit()
     cleanup(db, job)
+    realtime_notify(user, "import:done", "Impor Excel selesai.")
     return final
 
 
@@ -263,6 +265,7 @@ def confirm_receipt(job_id: str, body: ConfirmReceipt, user=Depends(owner), db: 
     job.result = {**job.result,"transaction_id":tx.id}
     job.status = "done"
     db.commit()
+    realtime_notify(user, "receipt:confirm")
     return job.result
 
 

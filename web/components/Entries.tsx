@@ -31,11 +31,14 @@ const err = (e: unknown) => (e instanceof Error ? e.message : "Gagal menyimpan p
 
 type ScanResult = {
     merchant?: string;
+    merchant_name?: string;
+    items?: string[];
     amount?: number | null;
     amount_options?: number[];
     date?: string | null;
     category_id?: string | null;
     category_name?: string | null;
+    engine?: string;
 };
 
 function formatDots(val: string | number): string {
@@ -507,8 +510,9 @@ export function EntryForm({
             if (autoCat) setCatId(autoCat);
             const catLabel =
                 res.category_name || categories.find(c => c.id === autoCat)?.name || "Otomatis";
+            const engineLabel = res.engine === "gemini" ? "AI Vision" : "OCR Lokal";
             setScanInfo(
-                `Struk terbaca otomatis · Kategori: ${catLabel} · Tanggal: ${res.date || today()}`
+                `Struk terbaca (${engineLabel}) · Kategori: ${catLabel} · Tanggal: ${res.date || today()}`
             );
         } catch (scanErr) {
             const cleanName = file.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim();

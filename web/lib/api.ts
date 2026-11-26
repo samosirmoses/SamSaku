@@ -33,6 +33,25 @@ export function setSavedToken(token: string) {
     }
 }
 
+export function wsEndpoint(): string {
+    if (typeof window === "undefined") return "";
+    if (endpoint.startsWith("https://")) return "wss://" + endpoint.slice(8) + "/ws";
+    if (endpoint.startsWith("http://")) return "ws://" + endpoint.slice(7) + "/ws";
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const prefix = endpoint.startsWith("/") ? endpoint : "/" + endpoint;
+    return `${proto}//${window.location.host}${prefix}/ws`;
+}
+
+export async function getAuthCredentials(): Promise<{ token?: string; dev_token?: string } | null> {
+    const token = (await supabase()?.auth.getSession())?.data.session?.access_token;
+    if (token) return { token };
+    if (allowDev()) {
+        const key = getSavedToken();
+        if (key) return { dev_token: key };
+    }
+    return null;
+}
+
 export async function request(path: string, init: RequestInit = {}, asBlob = false): Promise<unknown> {
     const headers = new Headers(init.headers);
     if (init.body && typeof init.body === "string") headers.set("Content-Type", "application/json");

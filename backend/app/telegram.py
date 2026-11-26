@@ -16,6 +16,7 @@ from .db import SessionLocal, get_db, lock_owner
 from .intake import ingest
 from .ledger import owned, post_transaction
 from .models import Account, Evidence
+from .realtime import notify as realtime_notify
 from .schemas import EventIn, TransactionIn
 
 router = APIRouter()
@@ -90,6 +91,7 @@ def confirm(db, owner_id, callback, chat_id):
             job.status = "done"
             job.result = {**job.result, "transaction_id": item.transaction_id, "decision": item.status}
         db.commit()
+        realtime_notify(owner_id, "telegram:confirm", "Transaksi Telegram diperbarui.")
     return {"method": "editMessageText", "chat_id": chat_id,
             "message_id": callback["message"]["message_id"],
             "text": "Draf dibatalkan." if item.status == "ignored" else "Transaksi sudah diproses di SamSaku."}
@@ -149,6 +151,7 @@ def receive(update: dict, db=Depends(get_db), x_telegram_bot_api_secret_token: s
                   "telegram_update": str(update["update_id"]), "description": result.get("merchant") or event_text}
         event.parsed = parsed
         db.commit()
+    realtime_notify(owner_id, "telegram:new", "Draf transaksi baru masuk dari Telegram.")
     account = db.scalar(select(Account).where(Account.owner_id == owner_id, Account.id == parsed.get("account_id")))
     amount = parsed.get("amount")
     value = ("Rp" + f"{amount:,}".replace(",", ".")) if isinstance(amount, int) else "Periksa nominal"

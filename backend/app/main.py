@@ -56,12 +56,15 @@ from .schemas import (
 )
 from .tools_api import router as tools_router
 from .telegram import router as telegram_router, start_telegram_poller_if_enabled
+from .realtime import hub as realtime_hub, notify as realtime_notify, router as realtime_router
 
 app = FastAPI(title="SamSaku", version="1.1.0")
 
 
 @app.on_event("startup")
-def _on_startup():
+async def _on_startup():
+    import asyncio
+    realtime_hub.bind_loop(asyncio.get_running_loop())
     start_telegram_poller_if_enabled()
 _cors_raw = os.getenv("CORS_ORIGINS", "*").strip()
 _cors_list = ["*"] if _cors_raw == "*" else [v.strip() for v in _cors_raw.split(",") if v.strip()]
@@ -131,6 +134,7 @@ def add_account(data: AccountIn, db: Session = DB, user: str = OWNER):
     obj = Account(owner_id=user, **data.model_dump(exclude={"code"}), code=data.code or str(uuid4()))
     db.add(obj)
     db.commit()
+    realtime_notify(user, "account:created")
     return {**columns(obj), "balance": balance(db, obj, datetime.now(JAKARTA).date()), "tx_count": 0}
 
 
@@ -138,6 +142,7 @@ def add_account(data: AccountIn, db: Session = DB, user: str = OWNER):
 def update_account_route(key: str, data: AccountEdit, db: Session = DB, user: str = OWNER):
     obj = edit_account(db, user, key, data)
     db.commit()
+    realtime_notify(user, "account:updated")
     return {
         **columns(obj),
         "balance": balance(db, obj, datetime.now(JAKARTA).date()),
@@ -155,6 +160,7 @@ def remove_account_route(
 ):
     delete_account(db, user, key, transfer_to=transfer_to, cascade=cascade)
     db.commit()
+    realtime_notify(user, "account:deleted")
     return Response(status_code=204)
 
 
@@ -172,6 +178,7 @@ def add_category(data: CategoryIn, db: Session = DB, user: str = OWNER):
     obj = Category(owner_id=user, **data.model_dump(exclude={"code"}), code=data.code or str(uuid4()))
     db.add(obj)
     db.commit()
+    realtime_notify(user, "category:created")
     return columns(obj)
 
 
@@ -179,6 +186,7 @@ def add_category(data: CategoryIn, db: Session = DB, user: str = OWNER):
 def edit_category(key: str, data: CategoryEdit, db: Session = DB, user: str = OWNER):
     obj = edit_category_item(db, user, key, data)
     db.commit()
+    realtime_notify(user, "category:updated")
     return columns(obj)
 
 
@@ -186,6 +194,7 @@ def edit_category(key: str, data: CategoryEdit, db: Session = DB, user: str = OW
 def remove_category(key: str, transfer_to: str | None = None, db: Session = DB, user: str = OWNER):
     delete_category(db, user, key, transfer_to=transfer_to)
     db.commit()
+    realtime_notify(user, "category:deleted")
     return Response(status_code=204)
 
 
@@ -198,6 +207,7 @@ def list_tx(start: date | None = None, end: date | None = None, db: Session = DB
 def add_tx(data: TransactionIn, db: Session = DB, user: str = OWNER):
     tx = post_transaction(db, user, data)
     db.commit()
+    realtime_notify(user, "transaction:created")
     return transaction_dict(db, tx)
 
 
@@ -206,6 +216,7 @@ def add_tx(data: TransactionIn, db: Session = DB, user: str = OWNER):
 def edit_tx(key: str, data: TransactionIn, db: Session = DB, user: str = OWNER):
     tx = update_transaction(db, user, key, data)
     db.commit()
+    realtime_notify(user, "transaction:updated")
     return transaction_dict(db, tx)
 
 
@@ -213,6 +224,7 @@ def edit_tx(key: str, data: TransactionIn, db: Session = DB, user: str = OWNER):
 def remove_tx(key: str, db: Session = DB, user: str = OWNER):
     delete_transaction(db, user, key)
     db.commit()
+    realtime_notify(user, "transaction:deleted")
     return Response(status_code=204)
 
 
@@ -225,6 +237,7 @@ def read_settings(db: Session = DB, user: str = OWNER):
 def save_settings(data: SettingsIn, db: Session = DB, user: str = OWNER):
     result = update_settings(db, user, data)
     db.commit()
+    realtime_notify(user, "settings:updated")
     return result
 
 
@@ -237,6 +250,7 @@ def read_budgets(start: date | None = None, end: date | None = None, db: Session
 def save_budget(data: BudgetIn, db: Session = DB, user: str = OWNER):
     result = upsert_budget(db, user, data)
     db.commit()
+    realtime_notify(user, "budget:updated")
     return result
 
 
@@ -244,6 +258,7 @@ def save_budget(data: BudgetIn, db: Session = DB, user: str = OWNER):
 def remove_budget(key: str, db: Session = DB, user: str = OWNER):
     delete_budget(db, user, key)
     db.commit()
+    realtime_notify(user, "budget:deleted")
     return Response(status_code=204)
 
 
@@ -296,6 +311,7 @@ def review(key: str, data: ResolveIn, db: Session = DB, user: str = OWNER):
     else:
         item.status = "ignored"
     db.commit()
+    realtime_notify(user, "review:resolved")
     return columns(item)
 
 
@@ -308,8 +324,11 @@ def event(
 ):
     if not authorization.startswith("Bearer ") or not secret_matches(authorization[7:], source.upper() + "_TOKEN"):
         raise HTTPException(401, "Kredensial konektor tidak valid.")
-    result = ingest(db, configured_owner(), source, data)
+    owner_id = configured_owner()
+    result = ingest(db, owner_id, source, data)
     db.commit()
+    label = "myBCA" if source == "bca" else source.upper()
+    realtime_notify(owner_id, f"event:{source}", f"Mutasi baru masuk dari {label}.")
     return {"id": result.id, "status": result.status, "transaction_id": result.transaction_id, "parsed": result.parsed}
 
 
@@ -394,3 +413,4 @@ def apply_scheme(key: str, data: ApplyIn, db: Session = DB, user: str = OWNER):
 app.include_router(api)
 app.include_router(tools_router)
 app.include_router(telegram_router)
+app.include_router(realtime_router)

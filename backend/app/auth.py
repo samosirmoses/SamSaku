@@ -28,7 +28,7 @@ def jwks(url: str):
     return PyJWKClient(url + "/auth/v1/.well-known/jwks.json", timeout=5)
 
 
-def owner(authorization: str = Header(""), x_dev_token: str = Header("")) -> str:
+def verify_owner(authorization: str = "", x_dev_token: str = "") -> str:
     user_id = configured_owner()
     if (os.getenv("SAMSAKU_ENV") != "production" or not os.getenv("OWNER_ID")) and secret_matches(x_dev_token, "SAMSAKU_DEV_TOKEN"):
         return user_id
@@ -45,3 +45,7 @@ def owner(authorization: str = Header(""), x_dev_token: str = Header("")) -> str
     if claims["sub"] != user_id:
         raise HTTPException(403, "Akun ini tidak memiliki akses.")
     return user_id
+
+
+def owner(authorization: str = Header(""), x_dev_token: str = Header("")) -> str:
+    return verify_owner(authorization=authorization, x_dev_token=x_dev_token)

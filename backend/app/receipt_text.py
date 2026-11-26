@@ -82,15 +82,17 @@ def extract(text):
         None,
     )
     amounts = set()
-    rx = r"(?<!\d)(?:Rp\.?\s*)?([0-9]{1,3}(?:\.\d{3})+(?:,00)?|[0-9]{2,}(?:,00)?)(?![\d,.])"
+    rx = r"(?<!\d)(?:Rp\.?\s*|IDR\s*)?([0-9]{1,3}(?:[.,]\d{3})+(?:[.,]00)?|[0-9]{4,9}(?:[.,]00)?)(?![\d,.])"
     for line in lines:
-        if re.search(r"(?i)sub\s*total|kembali|change|cashback|tunai|cash\s+(?:paid|received)|diskon|discount|hemat", line):
+        if re.search(r"(?i)sub\s*total|kembali|kembalian|change|cashback|tunai|cash\s+(?:paid|received)|diskon|discount|hemat|dpp|ppn|tax|pajak", line):
             continue
-        if re.search(r"(?i)\b(total|grand\s*total|total\s*bayar|total\s*belanja|jumlah\s*bayar|amount\s*due|tagihan|harus\s*dibayar)\b", line):
+        if re.search(r"(?i)\b(grand\s*total|total\s*bayar|total\s*belanja|jumlah\s*bayar|amount\s*due|harus\s*dibayar|netto|total|tagihan|qris|edc|debit\s*bca)\b", line):
             match = re.findall(rx, line, re.I)
             if match:
                 try:
-                    amounts.add(money(match[-1]))
+                    val = money(match[-1])
+                    if 500 <= val <= 500_000_000:
+                        amounts.add(val)
                 except ValueError:
                     pass
     if not amounts:

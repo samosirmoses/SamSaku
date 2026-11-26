@@ -171,6 +171,19 @@ export function period(month: string, startDay = 1): { start: string; end: strin
         const last = daysInMonth(y, m);
         return { start: fmtIso(y, m, 1), end: fmtIso(y, m, last) };
     }
+    if (clampedStart >= 15) {
+        // Majority of cycle days fall in `month` (e.g. startDay=26, month=2026-10 -> 26 Sep – 25 Okt 2026)
+        const prevY = m === 1 ? y - 1 : y;
+        const prevM = m === 1 ? 12 : m - 1;
+        const actualStartDay = Math.min(clampedStart, daysInMonth(prevY, prevM));
+        const start = fmtIso(prevY, prevM, actualStartDay);
+        const endCycleStartDay = Math.min(clampedStart, daysInMonth(y, m));
+        const endDate = new Date(y, m - 1, endCycleStartDay, 12, 0, 0);
+        endDate.setDate(endDate.getDate() - 1);
+        const end = fmtIso(endDate.getFullYear(), endDate.getMonth() + 1, endDate.getDate());
+        return { start, end };
+    }
+    // startDay 2..14: majority of cycle days fall in `month` starting in `month`
     const actualStartDay = Math.min(clampedStart, daysInMonth(y, m));
     const start = fmtIso(y, m, actualStartDay);
     const nextY = m === 12 ? y + 1 : y;
@@ -180,6 +193,19 @@ export function period(month: string, startDay = 1): { start: string; end: strin
     nextStartDate.setDate(nextStartDate.getDate() - 1);
     const end = fmtIso(nextStartDate.getFullYear(), nextStartDate.getMonth() + 1, nextStartDate.getDate());
     return { start, end };
+}
+
+export function cycleMonthForDate(isoDate: string, startDay = 1): string {
+    const clean = isoDate.slice(0, 10);
+    const [y, m, d] = clean.split("-").map(Number);
+    const base = `${y}-${String(m).padStart(2, "0")}`;
+    const clampedStart = Math.max(1, Math.min(31, startDay || 1));
+    if (clampedStart === 1) return base;
+    const boundaryDay = Math.min(clampedStart, daysInMonth(y, m));
+    if (clampedStart >= 15) {
+        return d >= boundaryDay ? shiftMonth(base, 1) : base;
+    }
+    return d < boundaryDay ? shiftMonth(base, -1) : base;
 }
 
 export function periodRangeLabel(month: string, startDay = 1): string {

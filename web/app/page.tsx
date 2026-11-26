@@ -26,7 +26,7 @@ import {
     Wallet,
     X,
 } from "lucide-react";
-import { allowDev, del, get, getSavedToken, post, setSavedToken, supabase } from "../lib/api";
+import { allowDev, del, get, getAuthCredentials, getSavedToken, post, setSavedToken, supabase, wsEndpoint } from "../lib/api";
 import {
     type Account,
     type Budget,
@@ -34,6 +34,7 @@ import {
     type Review,
     type Settings,
     type Transaction,
+    cycleMonthForDate,
     kindLabels,
     monthLabel,
     money,
@@ -131,9 +132,12 @@ export default function Page() {
     }>({});
     const [confirmDeleteTx, setConfirmDeleteTx] = useState(false);
     const [deletingTx, setDeletingTx] = useState(false);
+    const [live, setLive] = useState(false);
 
     const main = useRef<HTMLElement>(null);
     const loadedMonth = useRef("");
+    const userPickedMonth = useRef(false);
+    const silentRefresh = useRef(false);
 
     function applyTheme(next: "light" | "dark") {
         setTheme(next);
@@ -181,14 +185,24 @@ export default function Page() {
     useEffect(() => {
         if (!month || !ready) return;
         let valid = true;
+        const isSilent = silentRefresh.current && loadedMonth.current === month;
+        silentRefresh.current = false;
         setError("");
-        if (loadedMonth.current !== month) setData(null);
-        setLoading(true);
+        if (!isSilent) {
+            if (loadedMonth.current !== month) setData(null);
+            setLoading(true);
+        }
 
         get<Settings>("/settings")
             .catch(() => ({ monthly_start_day: 1, weekly_start_day: 1, default_account_id: null }))
             .then(settings => {
-                const range = period(month, settings.monthly_start_day || 1);
+                const startDay = settings.monthly_start_day || 1;
+                const activeCycleMonth = cycleMonthForDate(today(), startDay);
+                if (!userPickedMonth.current && activeCycleMonth !== month) {
+                    if (valid) setMonth(activeCycleMonth);
+                    return null;
+                }
+                const range = period(month, startDay);
                 const q = "?" + new URLSearchParams(range);
                 return Promise.all([
                     Promise.resolve(settings),
@@ -200,31 +214,128 @@ export default function Page() {
                     get<Data["connections"]>("/connections"),
                 ]);
             })
-            .then(([settings, accounts, categories, reviews, budgets, summary, connections]) => {
-                if (valid) {
-                    loadedMonth.current = month;
-                    setData({
-                        accounts,
-                        categories,
-                        transactions: summary.transactions,
-                        reviews,
-                        budgets: summary.budgets || budgets,
-                        settings,
-                        summary,
-                        connections,
-                    });
-                }
+            .then(res => {
+                if (!res || !valid) return;
+                const [settings, accounts, categories, reviews, budgets, summary, connections] = res;
+                loadedMonth.current = month;
+                setData({
+                    accounts,
+                    categories,
+                    transactions: summary.transactions,
+                    reviews,
+                    budgets: summary.budgets || budgets,
+                    settings,
+                    summary,
+                    connections,
+                });
             })
             .catch(e => {
-                if (valid) setError(e.message);
+                if (valid && !isSilent) setError(e.message);
             })
             .finally(() => {
-                if (valid) setLoading(false);
+                if (valid && !isSilent) setLoading(false);
             });
         return () => {
             valid = false;
         };
     }, [month, ready, demoMode, refresh]);
+
+    useEffect(() => {
+        if (!ready || !authed || demoMode) {
+            setLive(false);
+            return;
+        }
+        const url = wsEndpoint();
+        if (!url) return;
+        let active = true;
+        let ws: WebSocket | null = null;
+        let retryDelay = 2000;
+        let retryTimer: ReturnType<typeof setTimeout> | null = null;
+        let pingTimer: ReturnType<typeof setInterval> | null = null;
+
+        const triggerSilentRefresh = (msg?: string) => {
+            silentRefresh.current = true;
+            setRefresh(v => v + 1);
+            if (msg) setNotice(msg);
+        };
+
+        const connect = async () => {
+            if (!active) return;
+            const creds = await getAuthCredentials();
+            if (!active || !creds) return;
+            try {
+                ws = new WebSocket(url);
+            } catch {
+                scheduleReconnect();
+                return;
+            }
+            ws.onopen = () => {
+                if (!active || !ws) return;
+                ws.send(JSON.stringify({ type: "auth", ...creds }));
+            };
+            ws.onmessage = ev => {
+                if (!active) return;
+                try {
+                    const msg = JSON.parse(String(ev.data || "{}"));
+                    if (msg.type === "connected") {
+                        setLive(true);
+                        retryDelay = 2000;
+                        if (pingTimer) clearInterval(pingTimer);
+                        pingTimer = setInterval(() => {
+                            if (ws && ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ type: "ping" }));
+                            }
+                        }, 25000);
+                    } else if (msg.type === "ping") {
+                        ws?.send(JSON.stringify({ type: "pong" }));
+                    } else if (msg.type === "sync") {
+                        const toastMsg =
+                            typeof msg.message === "string" && msg.message.trim() ? msg.message.trim() : undefined;
+                        triggerSilentRefresh(toastMsg);
+                    }
+                } catch {}
+            };
+            ws.onclose = () => {
+                if (!active) return;
+                setLive(false);
+                if (pingTimer) {
+                    clearInterval(pingTimer);
+                    pingTimer = null;
+                }
+                scheduleReconnect();
+            };
+            ws.onerror = () => {
+                ws?.close();
+            };
+        };
+
+        const scheduleReconnect = () => {
+            if (!active || retryTimer) return;
+            retryTimer = setTimeout(() => {
+                retryTimer = null;
+                retryDelay = Math.min(retryDelay * 1.5, 15000);
+                connect();
+            }, retryDelay);
+        };
+
+        const onVisible = () => {
+            if (document.visibilityState === "visible") {
+                triggerSilentRefresh();
+                if (!ws || ws.readyState === WebSocket.CLOSED) connect();
+            }
+        };
+
+        connect();
+        document.addEventListener("visibilitychange", onVisible);
+        return () => {
+            active = false;
+            setLive(false);
+            document.removeEventListener("visibilitychange", onVisible);
+            if (retryTimer) clearTimeout(retryTimer);
+            if (pingTimer) clearInterval(pingTimer);
+            ws?.close();
+        };
+    }, [ready, authed, demoMode]);
 
     useEffect(() => {
         if (!notice) return;
@@ -405,8 +516,8 @@ export default function Page() {
                         </button>
                         {ready && (
                             <button onClick={() => setDialog("login")} className="account-badge">
-                                <span className={"dot " + (!demoMode ? "online" : "")} />
-                                {demoMode ? "Sandbox Interaktif" : "Server Terhubung"}
+                                <span className={"dot " + (!demoMode ? (live ? "online live" : "online") : "")} />
+                                {demoMode ? "Sandbox" : live ? "Live" : "Terhubung"}
                             </button>
                         )}
                         <span className="avatar" aria-hidden="true">
@@ -432,7 +543,10 @@ export default function Page() {
                                         type="button"
                                         className="icon-btn"
                                         aria-label="Periode sebelumnya"
-                                        onClick={() => setMonth(shiftMonth(month, -1))}
+                                        onClick={() => {
+                                            userPickedMonth.current = true;
+                                            setMonth(shiftMonth(month, -1));
+                                        }}
                                     >
                                         <ChevronLeft size={17} />
                                     </button>
@@ -444,14 +558,22 @@ export default function Page() {
                                             aria-label="Bulan tampilan"
                                             type="month"
                                             value={month}
-                                            onChange={e => e.target.value && setMonth(e.target.value)}
+                                            onChange={e => {
+                                                if (e.target.value) {
+                                                    userPickedMonth.current = true;
+                                                    setMonth(e.target.value);
+                                                }
+                                            }}
                                         />
                                     </label>
                                     <button
                                         type="button"
                                         className="icon-btn"
                                         aria-label="Periode berikutnya"
-                                        onClick={() => setMonth(shiftMonth(month, 1))}
+                                        onClick={() => {
+                                            userPickedMonth.current = true;
+                                            setMonth(shiftMonth(month, 1));
+                                        }}
                                     >
                                         <ChevronRight size={17} />
                                     </button>
@@ -459,10 +581,10 @@ export default function Page() {
                             )}
                             {page === "home" && (
                                 <>
-                                    <button className="btn" onClick={() => nav("stats")}>
+                                    <button className="btn desktop-only-action" onClick={() => nav("stats")}>
                                         <BarChart3 size={16} /> Statistik
                                     </button>
-                                    <button className="btn primary" onClick={() => openEntry()}>
+                                    <button className="btn primary desktop-only-action" onClick={() => openEntry()}>
                                         <Plus size={16} /> Catat transaksi
                                     </button>
                                 </>
@@ -570,7 +692,15 @@ export default function Page() {
                             )}
 
                             {page === "reports" && (
-                                <Reports data={data} month={month} demoMode={demoMode} setMonth={setMonth} />
+                                <Reports
+                                    data={data}
+                                    month={month}
+                                    demoMode={demoMode}
+                                    setMonth={m => {
+                                        userPickedMonth.current = true;
+                                        setMonth(m);
+                                    }}
+                                />
                             )}
 
                             {page === "import" && (
@@ -674,7 +804,11 @@ export default function Page() {
                                     demoMode={demoMode}
                                     theme={theme}
                                     onToggleTheme={applyTheme}
-                                    onDone={() => {
+                                    onDone={nextStartDay => {
+                                        if (typeof nextStartDay === "number") {
+                                            userPickedMonth.current = false;
+                                            setMonth(cycleMonthForDate(today(), nextStartDay));
+                                        }
                                         setRefresh(x => x + 1);
                                         setNotice("Pengaturan disimpan.");
                                     }}
