@@ -278,7 +278,21 @@ def receive(update: dict, db=Depends(get_db), x_telegram_bot_api_secret_token: s
     if amount and account and transfer_ready and not parsed.get("candidates"):
         buttons.insert(0, {"text": "Simpan", "callback_data": "save|" + event.id})
     else:
-        detail += "\nPeriksa draf di menu Tinjauan."
+        reasons = []
+        if not amount:
+            reasons.append("nominal belum terbaca")
+        if not account:
+            reasons.append("dompet asal belum terpilih")
+        if kind == "transfer" and not transfer_ready:
+            reasons.append("dompet asal/tujuan transfer belum lengkap atau sama")
+        candidates = parsed.get("candidates") or []
+        if candidates:
+            c0 = candidates[0]
+            reasons.append(
+                f"ditemukan {len(candidates)} transaksi mirip ({c0.get('date')} · {c0.get('description') or 'Transaksi'})"
+            )
+        reason_line = f"Alasan: {'; '.join(reasons)}." if reasons else ""
+        detail += f"\n⚠️ {reason_line} Periksa draf di menu Tinjauan."
     return reply(chat_id, detail, buttons)
 
 
