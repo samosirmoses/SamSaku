@@ -28,16 +28,23 @@ import {
 const toErr = (e: unknown) => (e instanceof Error ? e.message : "Gagal menyimpan perubahan.");
 
 type ScanResult = {
+    kind?: Transaction["kind"];
     merchant?: string;
     merchant_name?: string;
+    transaction_type?: string | null;
+    note?: string | null;
     items?: string[];
     amount?: number | null;
+    fee?: number;
     amount_options?: number[];
     date?: string | null;
     category_id?: string | null;
     category_name?: string | null;
     account_id?: string | null;
     account_name?: string | null;
+    to_account_id?: string | null;
+    to_account_name?: string | null;
+    account_guessed?: boolean;
     engine?: string;
 };
 
@@ -157,7 +164,9 @@ export function EntryForm({
             const form = new FormData();
             form.append("file", file);
             const res = (await request("/receipts/scan", { method: "POST", body: form })) as ScanResult;
-            setKind("expense");
+            const detectedKind: Transaction["kind"] =
+                res.kind === "transfer" || res.kind === "income" || res.kind === "expense" ? res.kind : "expense";
+            setKind(detectedKind);
             if (res.amount) setAmount(String(res.amount));
             if (res.amount_options && res.amount_options.length > 1) setAmountOptions(res.amount_options);
             if (res.date) setTxDate(res.date);
@@ -165,11 +174,41 @@ export function EntryForm({
             if (res.account_id && data.accounts.some(a => a.id === res.account_id)) {
                 setAccountId(res.account_id);
             }
-            const autoCat =
-                res.category_id || inferCategoryClient(res.merchant || file.name, categories, data.transactions);
-            if (autoCat) setCatId(autoCat);
-            const catLabel = res.category_name || categories.find(c => c.id === autoCat)?.name || "Otomatis";
-            setScanInfo(`Struk terbaca (Gemini Vision) · Kategori: ${catLabel} · Tanggal: ${res.date || today()}`);
+            if (detectedKind === "transfer") {
+                setSplit(false);
+                setCatId("");
+                setFee(String(res.fee || 0));
+                if (res.to_account_id && data.accounts.some(a => a.id === res.to_account_id)) {
+                    setToAccountId(res.to_account_id);
+                }
+                const fromLabel =
+                    res.account_name ||
+                    data.accounts.find(a => a.id === (res.account_id || accountId))?.name ||
+                    "Dompet asal";
+                const toLabel =
+                    res.to_account_name ||
+                    data.accounts.find(a => a.id === (res.to_account_id || toAccountId))?.name ||
+                    "Dompet tujuan";
+                const feeNote = res.fee ? ` · Admin ${money(res.fee)}` : "";
+                const guessNote = res.account_guessed ? " (dompet asal perkiraan)" : "";
+                setScanInfo(
+                    `Terdeteksi: Transfer · ${fromLabel} → ${toLabel}${feeNote}${guessNote} · Tanggal: ${res.date || today()}`
+                );
+            } else {
+                setFee("0");
+                const autoCat =
+                    res.category_id ||
+                    (detectedKind === "expense"
+                        ? inferCategoryClient(res.merchant || file.name, categories, data.transactions)
+                        : "");
+                if (autoCat) setCatId(autoCat);
+                const catLabel = res.category_name || categories.find(c => c.id === autoCat)?.name || "Otomatis";
+                const typeTag = res.transaction_type ? ` (${res.transaction_type})` : "";
+                const guessNote = res.account_guessed ? " · Dompet perkiraan" : "";
+                setScanInfo(
+                    `Terdeteksi: ${kindLabels[detectedKind]}${typeTag} · Kategori: ${catLabel}${guessNote} · Tanggal: ${res.date || today()}`
+                );
+            }
         } catch (scanErr) {
             const cleanName = file.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim();
             const numMatch = cleanName.match(/(\d{2,9})/);
@@ -330,19 +369,19 @@ export function EntryForm({
                 })}
             </div>
 
-            {kind === "expense" && !tx && (
+            {!tx && (
                 <div className={"receipt-autofill " + (autoScan ? "highlighted" : "")}>
                     {receiptPreviewUrl && (
                         <img src={receiptPreviewUrl} alt="Pratinjau struk" className="receipt-thumb" />
                     )}
                     <div className="receipt-autofill-text">
                         <strong>
-                            <Sparkles size={15} /> Auto-Fill dari Foto Struk
+                            <Sparkles size={15} /> Auto-Fill dari Foto Struk / Bukti Transfer
                         </strong>
                         <small>
                             {scanning
-                                ? "Sedang mengekstrak nominal, tanggal, merchant & kategori…"
-                                : "Unggah atau foto struk belanja agar form otomatis terisi tanpa ketik manual."}
+                                ? "Sedang membaca jenis transaksi, berita, nominal, dompet & kategori…"
+                                : "Unggah struk belanja atau bukti transfer BCA — otomatis kenali pengeluaran, pemasukan, atau transfer antar dompet."}
                         </small>
                     </div>
                     <label className="btn receipt-upload-btn">

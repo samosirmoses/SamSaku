@@ -2,6 +2,7 @@
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -72,6 +73,50 @@ def download_photo(file_id: str) -> bytes:
         raise HTTPException(503, "Foto Telegram belum bisa diambil.") from None
 
 
+def _fmt_rp(amount: int) -> str:
+    return "Rp" + f"{amount:,}".replace(",", ".")
+
+
+def _parse_photo_caption(db, owner_id: str, caption: str) -> tuple[str | None, str | None]:
+    """Split optional Telegram photo caption into matched wallet id and remaining note text."""
+    clean = (caption or "").strip()
+    if not clean or clean.lower() == "foto struk":
+        return None, None
+    accounts = list(db.scalars(select(Account).where(Account.owner_id == owner_id)).all())
+    matched = None
+    remaining = clean
+    for acc in sorted(accounts, key=lambda a: max(len(a.name), len(a.code)), reverse=True):
+        for token in (acc.name, acc.code):
+            if token and re.search(rf"(?<!\w){re.escape(token)}(?!\w)", remaining, re.I):
+                matched = acc
+                remaining = re.sub(rf"(?<!\w){re.escape(token)}(?!\w)", " ", remaining, count=1, flags=re.I)
+                break
+        if matched:
+            break
+    note = re.sub(r"^[\s\-:,/]+|[\s\-:,/]+$", "", re.sub(r"\s+", " ", remaining)).strip()
+    return (matched.id if matched else None), (note or None)
+
+
+def _prepare_tx_payload(parsed: dict) -> dict:
+    kind = parsed.get("kind") or "expense"
+    payload = {
+        "date": parsed.get("date"),
+        "kind": kind,
+        "account_id": parsed.get("account_id"),
+        "amount": parsed.get("amount"),
+        "description": parsed.get("description") or parsed.get("merchant") or "",
+    }
+    if kind == "transfer":
+        payload["to_account_id"] = parsed.get("to_account_id")
+        payload["fee"] = int(parsed.get("fee") or 0)
+        payload["category_id"] = None
+    else:
+        payload["category_id"] = parsed.get("category_id")
+        payload["to_account_id"] = None
+        payload["fee"] = 0
+    return payload
+
+
 def confirm(db, owner_id: str, callback: dict, chat_id) -> dict:
     action, _, key = callback.get("data", "").partition("|")
     if action not in {"save", "cancel"} or len(key) != 36:
@@ -85,9 +130,13 @@ def confirm(db, owner_id: str, callback: dict, chat_id) -> dict:
             item.status = "ignored"
         else:
             parsed = item.parsed or {}
-            if not parsed.get("amount") or not parsed.get("account_id") or parsed.get("candidates"):
+            kind = parsed.get("kind") or "expense"
+            transfer_invalid = kind == "transfer" and (
+                not parsed.get("to_account_id") or parsed.get("to_account_id") == parsed.get("account_id")
+            )
+            if not parsed.get("amount") or not parsed.get("account_id") or transfer_invalid or parsed.get("candidates"):
                 return reply(chat_id, "Periksa nominal, dompet, dan calon pasangan di Tinjauan SamSaku.")
-            data = TransactionIn.model_validate(parsed)
+            data = TransactionIn.model_validate(_prepare_tx_payload(parsed))
             tx = post_transaction(db, owner_id, data, item.source, item.external_id)
             item.status, item.transaction_id = "posted", tx.id
         if item.source == "receipt":
@@ -153,22 +202,38 @@ def receive(update: dict, db=Depends(get_db), x_telegram_bot_api_secret_token: s
         event.status = "forwarded"
     db.commit()
     if photos:
+        caption_account_id, caption_note = _parse_photo_caption(db, owner_id, text)
         lock_owner(db, owner_id)
         db.expire_all()
-        result = process_receipt(db, owner_id, parsed["receipt_job"])
+        result = process_receipt(
+            db,
+            owner_id,
+            parsed["receipt_job"],
+            caption_account_id=caption_account_id,
+            caption_note=caption_note,
+        )
         lock_owner(db, owner_id)
         db.expire_all()
         event = owned(db, Evidence, owner_id, result["evidence_id"])
         if event.status != "review":
             return reply(chat_id, "Bukti ini sudah diproses.")
+        kind = result.get("kind") or "expense"
         parsed = {
             **parsed,
             **event.parsed,
-            "kind": "expense",
+            "kind": kind,
             "date": result.get("date") or parsed["date"],
-            "account_id": parsed.get("account_id")
-            or result.get("account_id")
-            or get_settings(db, owner_id).get("default_account_id"),
+            "account_id": result.get("account_id")
+            or caption_account_id
+            or (
+                get_settings(db, owner_id).get("default_account_id")
+                if kind != "transfer"
+                else None
+            ),
+            "to_account_id": result.get("to_account_id") if kind == "transfer" else None,
+            "fee": int(result.get("fee") or 0) if kind == "transfer" else 0,
+            "category_id": None if kind == "transfer" else result.get("category_id"),
+            "category_name": None if kind == "transfer" else result.get("category_name"),
             "telegram_update": str(update["update_id"]),
             "description": result.get("merchant") or event_text,
         }
@@ -176,17 +241,41 @@ def receive(update: dict, db=Depends(get_db), x_telegram_bot_api_secret_token: s
         db.commit()
     realtime_notify(owner_id, "telegram:new", "Draf transaksi baru masuk dari Telegram.")
     account = db.scalar(select(Account).where(Account.owner_id == owner_id, Account.id == parsed.get("account_id")))
+    to_account = (
+        db.scalar(select(Account).where(Account.owner_id == owner_id, Account.id == parsed.get("to_account_id")))
+        if parsed.get("to_account_id")
+        else None
+    )
+    kind = parsed.get("kind") or "expense"
     amount = parsed.get("amount")
-    value = ("Rp" + f"{amount:,}".replace(",", ".")) if isinstance(amount, int) else "Periksa nominal"
+    fee = int(parsed.get("fee") or 0)
     cat_name = parsed.get("category_name")
+    tx_type = parsed.get("transaction_type")
     tx_date = parsed.get("date")
     engine = parsed.get("engine")
-    meta_parts = [p for p in (tx_date, cat_name) if p]
+    guessed_tag = " (dompet perkiraan)" if parsed.get("account_guessed") else ""
+
+    if kind == "transfer":
+        amt_label = _fmt_rp(amount) if isinstance(amount, int) else "Periksa nominal"
+        fee_label = f" (+admin {_fmt_rp(fee)})" if fee > 0 else ""
+        route_label = f"{account.name if account else 'Pilih asal'} → {to_account.name if to_account else 'Pilih tujuan'}{guessed_tag}"
+        header = f"⇄ Transfer {amt_label}{fee_label}\n{route_label}"
+        meta_parts = [p for p in (tx_date, tx_type) if p]
+    elif kind == "income":
+        amt_label = f"+{_fmt_rp(amount)}" if isinstance(amount, int) else "Periksa nominal"
+        header = f"{amt_label} · {account.name if account else 'Pilih dompet'}{guessed_tag}"
+        meta_parts = [p for p in (tx_date, cat_name, tx_type) if p]
+    else:
+        amt_label = f"−{_fmt_rp(amount)}" if isinstance(amount, int) else "Periksa nominal"
+        header = f"{amt_label} · {account.name if account else 'Pilih dompet'}{guessed_tag}"
+        meta_parts = [p for p in (tx_date, cat_name, tx_type) if p]
+
     meta_line = f"\n{' · '.join(meta_parts)}" if meta_parts else ""
     engine_line = "\n(AI Vision)" if engine == "gemini" else ""
-    detail = f"{value} · {account.name if account else 'Pilih dompet'}{meta_line}\n{parsed.get('description', event_text)}{engine_line}"
+    detail = f"{header}{meta_line}\n{parsed.get('description', event_text)}{engine_line}"
     buttons = [{"text": "Batalkan", "callback_data": "cancel|" + event.id}]
-    if amount and account and not parsed.get("candidates"):
+    transfer_ready = kind != "transfer" or (to_account is not None and account is not None and to_account.id != account.id)
+    if amount and account and transfer_ready and not parsed.get("candidates"):
         buttons.insert(0, {"text": "Simpan", "callback_data": "save|" + event.id})
     else:
         detail += "\nPeriksa draf di menu Tinjauan."

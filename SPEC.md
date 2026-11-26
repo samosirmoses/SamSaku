@@ -45,8 +45,14 @@ SamSaku adalah aplikasi pencatatan keuangan pribadi satu pemilik (*single-owner*
   - Bot Telegram (`POST /v1/webhooks/telegram` atau long-polling) menerima catatan teks singkat (`kopi 35k tunai`) dan foto struk dengan tombol konfirmasi inline (`Simpan` / `Batalkan`).
   - Data sensitif (nomor rekening/kartu, OTP, PIN, password) disamarkan otomatis sebelum disimpan (`redact`).
   - Pencatatan otomatis memerlukan template parser terverifikasi (`verified: true`), referensi penyedia, dan tanggal valid; bukti ambigu masuk antrean **Perlu ditinjau** (`/v1/reviews`).
-- **Scan struk belanja berbasis Gemini Vision AI:**
-  - Endpoint `POST /v1/receipts/scan` (auto-fill form) dan `POST /v1/receipts/{job_id}/process` menggunakan **Gemini Vision API** (default model `gemini-3.5-flash-lite`, dapat diatur via `GEMINI_MODEL`).
+- **Scan struk & bukti transfer berbasis Gemini Vision AI:**
+  - Endpoint `POST /v1/receipts/scan` (auto-fill form lintas tab) dan `POST /v1/receipts/{job_id}/process` (termasuk bot Telegram) menggunakan **Gemini Vision API** (default model `gemini-3.5-flash-lite`, dapat diatur via `GEMINI_MODEL`).
+  - Mengekstrak **jenis transaksi** (QRIS, Transfer ke BCA, BI-FAST, BCA Virtual Account, dll.), **berita/catatan**, nominal pokok, biaya admin, total bayar, serta nomor rekening asal & tujuan. Klasifikasi kategori memprioritaskan **Berita → Penerima/Merchant → Jenis Transaksi → histori transaksi** (mendukung kategori pengeluaran maupun pemasukan).
+  - Setiap dompet dapat menyimpan `account_number` opsional (penuh atau 4–10 digit terakhir, tidak unik agar 1 nomor HP bisa dipakai bersama oleh beberapa e-wallet). Pencocokan nomor rekening dilakukan murni di backend (*suffix match* + penyedia/prefix BCA VA seperti `70001` GoPay, `39358` OVO, `3901` DANA, `122` ShopeePay) tanpa mengirim nomor rekening pemilik ke API AI:
+    - Sumber = dompet sendiri & Tujuan = dompet sendiri → otomatis `transfer` (memisahkan `amount` & `fee` biaya admin).
+    - Sumber = rekening orang lain & Tujuan = dompet sendiri → otomatis `income`.
+    - Sumber = dompet sendiri & Tujuan = rekening/merchant lain → `expense` dengan total bayar (`nominal + biaya admin`).
+    - Nomor rekening mentah disamarkan (`****7890`) di `source_events` dan tampil tersamarkan (`•••• 7890`) di kartu dompet PWA.
   - OCR lokal Tesseract **sengaja tidak dipasang** agar ukuran Docker image kecil dan VPS murah aman dari lonjakan RAM.
 - **Impor Excel (`.xlsx`):**
   - Menyediakan template unduhan untuk `masters` dan `transactions`, pemetaan kolom fleksibel (dapat disimpan ulang), pratinjau tanpa mengubah buku kas (savepoint rollback), deteksi duplikat & transaksi mirip, serta publikasi atomik setelah persetujuan pemilik.

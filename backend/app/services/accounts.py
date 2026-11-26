@@ -165,6 +165,8 @@ def edit_account(db: Session, owner_id: str, key: str, data: AccountEdit) -> Acc
         account.code = data.code
     if data.kind is not None:
         account.kind = data.kind
+    if "account_number" in data.model_fields_set:
+        account.account_number = data.account_number
     if data.clear_opening:
         account.opening_date = None
         account.opening_balance = None

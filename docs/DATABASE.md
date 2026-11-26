@@ -41,7 +41,7 @@ erDiagram
 
 | Tabel | Model ORM | Fungsi | Constraint Unik |
 | --- | --- | --- | --- |
-| `accounts` | `Account` | Dompet/rekening dan titik saldo awal (`opening_date`, `opening_balance`) | `(owner_id, code)` |
+| `accounts` | `Account` | Dompet/rekening, identitas opsional (`account_number` non-unik untuk pencocokan bukti transfer), dan titik saldo awal (`opening_date`, `opening_balance`) | `(owner_id, code)` |
 | `categories` | `Category` | Kategori pemasukan/pengeluaran (maksimal 2 tingkat via `parent_id`) | `(owner_id, code)` |
 | `merchants` | `Merchant` | Master toko/merchant | `(owner_id, code)` |
 | `merchant_aliases` | `Alias` | Nama alias merchant saat impor | `(owner_id, name)` |
@@ -69,6 +69,7 @@ erDiagram
 | `0002` | `0002_tools.py` | Tabel `file_jobs` dan `import_entries` + RLS PostgreSQL. |
 | `0003` | `0003_budgets_and_settings.py` | Tabel `user_settings` dan `budgets` + RLS PostgreSQL. |
 | `0004` | `0004_performance_indexes.py` | Composite index performa untuk query cepat pada VPS rendah RAM. |
+| `0005` | `0005_account_number.py` | Menambahkan kolom opsional `account_number VARCHAR(32)` pada tabel `accounts` untuk deteksi otomatis sumber dana & transfer antar dompet. |
 
 ### Index Performa (Migrasi `0004`)
 - `ix_transactions_owner_date` pada `transactions (owner_id, date)` — mempercepat filter rentang siklus di `/v1/bootstrap`, `/v1/summary`, `/v1/transactions`.

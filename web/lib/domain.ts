@@ -15,6 +15,7 @@ export type Account = {
     code: string;
     name: string;
     kind?: string;
+    account_number?: string | null;
     opening_date?: string | null;
     opening_balance?: number | null;
     balance?: number | null;
@@ -22,6 +23,13 @@ export type Account = {
     free_balance?: number | null;
     tx_count?: number;
 };
+
+export function maskAccountNumber(num?: string | null): string {
+    if (!num) return "";
+    const digits = num.replace(/\D/g, "");
+    if (digits.length < 4) return "";
+    return `•••• ${digits.slice(-4)}`;
+}
 
 export type Category = {
     id: string;
@@ -63,6 +71,8 @@ export type Review = {
     parsed?: {
         kind?: Transaction["kind"];
         account_id?: string;
+        to_account_id?: string;
+        fee?: number;
         date?: string;
         description?: string;
         merchant?: string;

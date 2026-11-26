@@ -30,7 +30,7 @@ Semua endpoint aplikasi memakai awalan `/v1` (kecuali `/health`), mengembalikan 
 ### Dompet, Kategori & Transaksi
 | Method | Path | Deskripsi |
 | --- | --- | --- |
-| `GET` / `POST` | `/v1/accounts` | Daftar dompet (termasuk `balance`, `reserved`, `free_balance`, `tx_count` via batch query) / tambah dompet |
+| `GET` / `POST` | `/v1/accounts` | Daftar dompet (termasuk `account_number`, `balance`, `reserved`, `free_balance`, `tx_count` via batch query) / tambah dompet |
 | `PATCH` / `DELETE` | `/v1/accounts/{key}` | Ubah dompet / hapus dompet (`?transfer_to=<id>` atau `?cascade=true`) |
 | `GET` / `POST` | `/v1/categories` | Daftar kategori / tambah kategori (mendukung `parent_id`) |
 | `PATCH` / `DELETE` | `/v1/categories/{key}` | Ubah kategori / hapus kategori (`?transfer_to=<id>`) |
@@ -63,7 +63,7 @@ Semua endpoint aplikasi memakai awalan `/v1` (kecuali `/health`), mengembalikan 
 | `GET` | `/v1/imports/{job_id}` & `/v1/imports/{job_id}/errors` | Status batch & ekspor CSV baris bermasalah |
 | `POST` | `/v1/imports/{job_id}/preview` | Pratinjau dampak impor (savepoint rollback, tidak mengubah buku kas) |
 | `POST` | `/v1/imports/{job_id}/commit` | Publikasi atomik batch yang sudah ditinjau |
-| `POST` | `/v1/receipts/scan` | Scan struk langsung via **Gemini Vision AI** untuk auto-fill form |
+| `POST` | `/v1/receipts/scan` | Scan struk & bukti transfer via **Gemini Vision AI** untuk auto-fill form (otomatis deteksi `expense`/`income`/`transfer`, dompet asal/tujuan, biaya admin, jenis transaksi, berita & kategori) |
 | `POST` | `/v1/receipts`, `/v1/receipts/{job_id}/process`, `/v1/receipts/{job_id}/confirm` | Alur unggah → proses AI → konfirmasi struk berbasis job |
 | `GET` | `/v1/reports/{format}` | Unduh laporan `csv` atau `pdf` (`start`, `end`, `details=true\|false`) — PDF dirender di subprocess terisolasi |
 | `POST` | `/v1/jobs/tick` | Bersihkan file sementara kedaluwarsa & lanjutkan job tertunda |

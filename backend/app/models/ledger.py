@@ -42,6 +42,7 @@ class Account(Owned, Base):
     currency: Mapped[str] = mapped_column(String(3), default="IDR")
     opening_date: Mapped[CalendarDate | None] = mapped_column(Date)
     opening_balance: Mapped[int | None] = mapped_column(BigInteger)
+    account_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class Category(Owned, Base):

@@ -65,8 +65,9 @@ backend/app/
 │   ├── intake.py            # Redaksi PII, cache parser-rules JSON, ingest bukti
 │   ├── imports.py           # Evaluasi savepoint & publikasi atomik workbook Excel
 │   ├── jobs.py              # Penyimpanan file sementara (DB lokal / Supabase Storage)
-│   ├── ocr.py               # Scan struk Gemini Vision only (tanpa Tesseract lokal)
-│   ├── receipt_text.py      # Ekstraksi tanggal & inferensi kategori berbasis aturan/riwayat
+│   ├── ocr.py               # Scan struk & bukti transfer Gemini Vision only (tanpa Tesseract lokal)
+│   ├── receipt_matching.py  # Pencocokan nomor rekening/VA (suffix match), klasifikasi transfer/income/expense & redaksi PII
+│   ├── receipt_text.py      # Ekstraksi tanggal & inferensi kategori (pengeluaran/pemasukan) berbasis berita/aturan/riwayat
 │   ├── reports.py           # CSV & render PDF WeasyPrint di subprocess spawn terisolasi
 │   └── xlsx.py              # Parser/generator workbook openpyxl yang aman
 └── routers/

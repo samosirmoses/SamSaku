@@ -25,6 +25,7 @@ export function MasterForm({
     const [name, setName] = useState(account?.name || "");
     const [code, setCode] = useState(account?.code || "");
     const [accountKind, setAccountKind] = useState(account?.kind || "bank");
+    const [accountNumber, setAccountNumber] = useState(account?.account_number || "");
     const [openingBalance, setOpeningBalance] = useState(
         account?.opening_balance != null ? String(account.opening_balance) : "0"
     );
@@ -63,10 +64,12 @@ export function MasterForm({
             } else if (isEditAccount && account) {
                 const rawBal = openingBalance.trim();
                 const hasOpening = rawBal !== "" && openingDate.trim() !== "";
+                const cleanAccNo = accountNumber.replace(/[\s.\-]+/g, "").trim();
                 await patch("/accounts/" + account.id, {
                     code: cleanCode,
                     name: cleanName,
                     kind: accountKind,
+                    account_number: cleanAccNo || null,
                     opening_date: hasOpening ? openingDate : null,
                     opening_balance: hasOpening ? parseDigits(rawBal) : null,
                     clear_opening: !hasOpening,
@@ -74,10 +77,12 @@ export function MasterForm({
             } else {
                 const rawBal = openingBalance.trim();
                 const hasOpening = rawBal !== "";
+                const cleanAccNo = accountNumber.replace(/[\s.\-]+/g, "").trim();
                 await post("/accounts", {
                     code: cleanCode,
                     name: cleanName,
                     kind: accountKind,
+                    account_number: cleanAccNo || null,
                     opening_date: hasOpening ? openingDate || today() : null,
                     opening_balance: hasOpening ? parseDigits(rawBal) : null,
                 });
@@ -242,6 +247,27 @@ export function MasterForm({
                             />
                         </Field>
                     </div>
+
+                    {accountKind !== "cash" && (
+                        <Field label="Nomor Rekening / No. HP (opsional)">
+                            <input
+                                name="account_number"
+                                inputMode="numeric"
+                                value={accountNumber}
+                                onChange={e => setAccountNumber(e.target.value.replace(/[^\d\s.-]/g, ""))}
+                                maxLength={28}
+                                placeholder={
+                                    accountKind === "ewallet"
+                                        ? "Misal: 081234567890 (atau 4–10 digit terakhir)"
+                                        : "Misal: 1234567890 (atau 4–10 digit terakhir)"
+                                }
+                            />
+                            <small className="muted">
+                                Dipakai untuk deteksi otomatis transfer antar dompet &amp; sumber dana dari foto bukti
+                                transaksi.
+                            </small>
+                        </Field>
+                    )}
                 </>
             )}
 

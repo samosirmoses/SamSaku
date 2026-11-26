@@ -32,6 +32,7 @@ function initialStore(): DemoStore {
             code: "BCA",
             name: "myBCA",
             kind: "bank",
+            account_number: "1234567890",
             opening_date: "2026-01-01",
             opening_balance: 5000000,
             balance: 6840000,
@@ -41,6 +42,7 @@ function initialStore(): DemoStore {
             code: "GOPAY",
             name: "GoPay",
             kind: "ewallet",
+            account_number: "081234567890",
             opening_date: "2026-01-01",
             opening_balance: 500000,
             balance: 485000,
@@ -409,6 +411,7 @@ export function handleDemoRequest(path: string, init: RequestInit = {}): unknown
                 code: body.code || id.toUpperCase(),
                 name: body.name,
                 kind: body.kind || "wallet",
+                account_number: body.account_number || null,
                 opening_date: body.opening_date || today(),
                 opening_balance: body.opening_balance ?? 0,
             };
@@ -428,6 +431,7 @@ export function handleDemoRequest(path: string, init: RequestInit = {}): unknown
                 name: body.name ?? current.name,
                 code: body.code ?? current.code,
                 kind: body.kind ?? current.kind,
+                account_number: "account_number" in body ? body.account_number : current.account_number,
                 opening_date: body.clear_opening ? null : body.opening_date ?? current.opening_date,
                 opening_balance: body.clear_opening ? null : body.opening_balance ?? current.opening_balance,
             };

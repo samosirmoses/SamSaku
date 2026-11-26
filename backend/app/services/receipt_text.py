@@ -46,6 +46,25 @@ CATEGORY_RULES = [
     ),
 ]
 
+INCOME_CATEGORY_RULES = [
+    (
+        r"gaji|salary|upah|payroll",
+        r"\b(gaji|salary|payroll|tunjangan|thr|upah)\b",
+    ),
+    (
+        r"bonus|freelance|proyek|project|komisi|insentif|honor",
+        r"\b(bonus|freelance|proyek|project|invoice|komisi|insentif|honor|fee)\b",
+    ),
+    (
+        r"invest|dividen|bunga|profit|return|saham|reksadana",
+        r"\b(dividen|bunga|interest|profit|yield|kupon|saham|reksadana)\b",
+    ),
+    (
+        r"jual|usaha|bisnis|omzet|dagang",
+        r"\b(jualan|penjualan|omzet|bayar\s+order|pelunasan|dp\s+order)\b",
+    ),
+]
+
 
 def _extract_date(text: str) -> str | None:
     for value in re.findall(r"\b(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})\b", text):
@@ -136,14 +155,32 @@ def infer_category(
     history: list[dict],
     text: str,
     merchant: str | None,
+    kind: str = "expense",
+    note: str | None = None,
 ) -> tuple[str | None, str | None]:
-    """Automatically determine expense category from history and receipt text."""
-    expense_cats = [c for c in categories if c.get("kind") == "expense" and not c.get("archived")]
-    if not expense_cats:
+    """Automatically determine expense or income category from note, history, and receipt text."""
+    target_cats = [c for c in categories if c.get("kind") == kind and not c.get("archived")]
+    if not target_cats:
         return None, None
-    cat_by_id = {c["id"]: c for c in expense_cats}
-    haystack = f"{merchant or ''}\n{text or ''}".lower()
+    cat_by_id = {c["id"]: c for c in target_cats}
+    rules = INCOME_CATEGORY_RULES if kind == "income" else CATEGORY_RULES
 
+    # 1. Highest priority: explicit transfer note (berita)
+    if note:
+        note_low = note.lower().strip()
+        for c in target_cats:
+            c_words = [w for w in re.split(r"[^a-z0-9]+", c["name"].lower()) if len(w) >= 4]
+            if any(re.search(rf"\b{re.escape(w)}\b", note_low) for w in c_words):
+                return c["id"], c["name"]
+        for cat_pattern, text_pattern in rules:
+            if re.search(text_pattern, note_low, re.I):
+                for c in target_cats:
+                    if re.search(cat_pattern, c["name"], re.I):
+                        return c["id"], c["name"]
+
+    haystack = f"{note or ''}\n{merchant or ''}\n{text or ''}".lower()
+
+    # 2. Recent history match on merchant/recipient
     if merchant:
         m_low = merchant.lower().strip()
         m_tokens = [w for w in re.split(r"[^a-z0-9]+", m_low) if len(w) >= 3]
@@ -154,18 +191,20 @@ def infer_category(
                 if m_low in desc or desc in m_low or any(tok in desc.split() for tok in m_tokens):
                     return cid, cat_by_id[cid]["name"]
 
-    for c in expense_cats:
+    # 3. Direct category name word match
+    for c in target_cats:
         c_words = [w for w in re.split(r"[^a-z0-9]+", c["name"].lower()) if len(w) >= 4]
         if any(re.search(rf"\b{re.escape(w)}\b", haystack) for w in c_words):
             return c["id"], c["name"]
 
-    for cat_pattern, text_pattern in CATEGORY_RULES:
+    # 4. Keyword rule match
+    for cat_pattern, text_pattern in rules:
         if re.search(text_pattern, haystack, re.I):
-            for c in expense_cats:
+            for c in target_cats:
                 if re.search(cat_pattern, c["name"], re.I):
                     return c["id"], c["name"]
 
-    other = next((c for c in expense_cats if re.search(r"lain|other|umum", c["name"], re.I)), None)
+    other = next((c for c in target_cats if re.search(r"lain|other|umum", c["name"], re.I)), None)
     if other:
         return other["id"], other["name"]
-    return expense_cats[0]["id"], expense_cats[0]["name"]
+    return target_cats[0]["id"], target_cats[0]["name"]

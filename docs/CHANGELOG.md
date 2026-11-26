@@ -4,6 +4,16 @@ Seluruh perubahan penting pada arsitektur, fitur, skema database, dan performa d
 
 ---
 
+## [2.1.0] — 2026-11-27 — Enhanced Scan Bukti BCA, Deteksi Sumber Dana & Transfer Antar Dompet Otomatis
+
+### Fitur & Kecerdasan Bukti Transaksi
+- **Identitas Dompet Opsional (`account_number`):** Menambahkan kolom opsional `account_number` (migrasi Alembic `0005_account_number.py`, non-unik agar 1 nomor HP bisa dipakai bersama di GoPay, OVO, DANA, ShopeePay) dengan tampilan tersamarkan (`•••• 7890`) di kartu dompet PWA dan input di Master Data.
+- **Ekstraksi Gemini Vision Terstruktur (`ocr.py` & `receipt_matching.py`):** Membaca **jenis transaksi** (QRIS, Transfer ke BCA, BI-FAST, BCA Virtual Account, dll.), **berita transfer**, nominal pokok, biaya admin, total bayar, serta bank & nomor rekening asal/tujuan. Klasifikasi kategori memprioritaskan **Berita → Penerima/Merchant → Jenis Transaksi → histori** untuk pengeluaran maupun pemasukan.
+- **Deteksi Otomatis Transfer Antar Dompet, Pemasukan & Sumber Dana:** Pencocokan nomor rekening dilakukan murni di backend (*suffix match* + peta prefix BCA VA `70001`/`39358`/`3901`/`122`/`09110`, mendukung nomor tersamarkan m-BCA `***7890` tanpa mengirim nomor rekening pemilik ke API AI). Transfer antar dompet otomatis memisahkan `amount` dan `fee`; pengeluaran ke pihak luar memakai total bayar; nomor rekening mentah disamarkan (`****7890`) sebelum disimpan ke `source_events`.
+- **Telegram & PWA Terpadu:** Bot Telegram kini mendukung simpan 1-klik untuk `transfer` (`Dari → Ke` + admin), `income`, dan `expense` serta memanfaatkan caption foto sebagai petunjuk dompet/berita. Form transaksi Web App (`EntryForm`) membuka auto-fill foto struk di semua tab dan otomatis berpindah tab sesuai hasil deteksi.
+
+---
+
 ## [2.0.0] — 2026-11-26 — Refactor Arsitektur, Optimasi VPS Murah & Living Spec
 
 ### Arsitektur & Maintainability

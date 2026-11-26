@@ -1,6 +1,6 @@
 "use client";
 import { ArrowLeftRight, Coins, Landmark, ListFilter, Pencil, Plus, Smartphone, Wallet } from "lucide-react";
-import { type Account, type Data, accountKindLabels, money } from "../../lib/domain";
+import { type Account, type Data, accountKindLabels, maskAccountNumber, money } from "../../lib/domain";
 
 export function AccountsSection({
     data,
@@ -73,6 +73,7 @@ export function AccountsSection({
                                             <strong>{a.name}</strong>
                                             <small>
                                                 {accountKindLabels[a.kind || kindKey] || "Dompet"}
+                                                {a.account_number ? ` · ${maskAccountNumber(a.account_number)}` : ""}
                                                 {isDefault ? " · Utama" : ""}
                                             </small>
                                         </div>
