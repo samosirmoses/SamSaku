@@ -363,6 +363,32 @@ export function handleDemoRequest(path: string, init: RequestInit = {}): unknown
               ? init.body
               : {};
 
+    // Single-request bootstrap (matches GET /v1/bootstrap)
+    if (pathname === "/bootstrap" && method === "GET") {
+        const startDay = store.settings.monthly_start_day || 1;
+        const reqMonth = url.searchParams.get("month");
+        const activeMonth = reqMonth || today().slice(0, 7);
+        const range = period(activeMonth, startDay);
+        const start = url.searchParams.get("start") || range.start;
+        const end = url.searchParams.get("end") || range.end;
+        const summary = computeSummary(store, start, end);
+        return {
+            month: activeMonth,
+            settings: store.settings,
+            accounts: computeAccounts(store),
+            categories: store.categories,
+            transactions: summary.transactions,
+            reviews: [],
+            budgets: summary.budgets || computeBudgets(store, start, end),
+            summary,
+            connections: [
+                { source: "bca", last_received_at: null },
+                { source: "gopay", last_received_at: null },
+                { source: "telegram", last_received_at: null },
+            ],
+        };
+    }
+
     // Settings
     if (pathname === "/settings") {
         if (method === "GET") return store.settings;

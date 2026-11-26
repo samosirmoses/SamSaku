@@ -1,92 +1,63 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
-import {
-    ArrowLeftRight,
-    BarChart3,
-    CalendarDays,
-    Camera,
-    ChevronDown,
-    ChevronLeft,
-    ChevronRight,
-    Database,
-    FileChartColumnIncreasing,
-    FileSpreadsheet,
-    Home,
-    Inbox,
-    LogIn,
-    LogOut,
-    Menu,
-    Moon,
-    Pencil,
-    Plus,
-    ReceiptText,
-    Settings as SettingsIcon,
-    Sun,
-    Trash2,
-    Wallet,
-    X,
-} from "lucide-react";
-import { allowDev, del, get, getAuthCredentials, getSavedToken, post, setSavedToken, supabase, wsEndpoint } from "../lib/api";
+import dynamic from "next/dynamic";
+import { useCallback, useEffect, useState } from "react";
+import { BottomNav, PageHeader, QuickFab, SidebarNav, Topbar } from "../components/layout/AppChrome";
+import type { Page } from "../components/layout/navigation";
+import { ErrorNote, Modal } from "../components/ui";
+import { DashboardView } from "../features/dashboard/DashboardView";
+import { useAuth } from "../hooks/useAuth";
+import { useLedgerData } from "../hooks/useLedgerData";
+import { useRealtimeSync } from "../hooks/useRealtimeSync";
+import { useTheme } from "../hooks/useTheme";
 import {
     type Account,
-    type Budget,
-    type Data,
+    type Category,
     type Review,
-    type Settings,
     type Transaction,
     cycleMonthForDate,
-    kindLabels,
-    monthLabel,
-    money,
-    period,
-    periodRangeLabel,
-    shiftMonth,
     today,
 } from "../lib/domain";
-import { Dashboard, Accounts } from "../components/Dashboard";
-import { Field, Modal, ErrorNote } from "../components/ui";
-import { CategoryEdit } from "../components/CategoryEdit";
-import { EntryForm, MasterForm } from "../components/Entries";
-import { BudgetsView } from "../components/Planning";
-import { Importer } from "../components/Importer";
-import { Reports } from "../components/Reports";
-import { Statistics } from "../components/Statistics";
-import { SettingsView } from "../components/SettingsView";
-import { TransactionsView } from "../components/TransactionsView";
 
-type Page =
-    | "home"
-    | "transactions"
-    | "budgets"
-    | "stats"
-    | "reports"
-    | "import"
-    | "masters"
-    | "settings"
-    | "reviews";
+const LoadingCard = () => (
+    <div role="status" className="card loading">
+        Memuat tampilan…
+    </div>
+);
 
-const labels: Record<Page, string> = {
-    home: "Ringkasan",
-    transactions: "Transaksi",
-    budgets: "Anggaran",
-    stats: "Statistik",
-    reports: "Laporan",
-    import: "Impor Excel",
-    masters: "Master data",
-    settings: "Pengaturan",
-    reviews: "Perlu ditinjau",
-};
-
-const links = [
-    { page: "home", icon: Home },
-    { page: "transactions", icon: ReceiptText },
-    { page: "budgets", icon: Wallet },
-    { page: "stats", icon: BarChart3 },
-    { page: "reports", icon: FileChartColumnIncreasing },
-    { page: "import", icon: FileSpreadsheet },
-    { page: "masters", icon: Database },
-    { page: "settings", icon: SettingsIcon },
-] as const;
+// Lazy-load secondary pages & modals to keep initial bundle small on mobile and low-bandwidth connections
+const TransactionsView = dynamic(
+    () => import("../features/transactions/TransactionsView").then(m => m.TransactionsView),
+    { loading: LoadingCard }
+);
+const BudgetsView = dynamic(() => import("../features/budgets/BudgetsView").then(m => m.BudgetsView), {
+    loading: LoadingCard,
+});
+const StatisticsView = dynamic(() => import("../features/statistics/StatisticsView").then(m => m.StatisticsView), {
+    loading: LoadingCard,
+});
+const ReportsView = dynamic(() => import("../features/reports/ReportsView").then(m => m.ReportsView), {
+    loading: LoadingCard,
+});
+const ImporterView = dynamic(() => import("../features/importer/ImporterView").then(m => m.ImporterView), {
+    loading: LoadingCard,
+});
+const MastersView = dynamic(() => import("../features/masters/MastersView").then(m => m.MastersView), {
+    loading: LoadingCard,
+});
+const SettingsView = dynamic(() => import("../features/settings/SettingsView").then(m => m.SettingsView), {
+    loading: LoadingCard,
+});
+const ReviewsView = dynamic(() => import("../features/reviews/ReviewsView").then(m => m.ReviewsView), {
+    loading: LoadingCard,
+});
+const LoginModal = dynamic(() => import("../features/auth/LoginModal").then(m => m.LoginModal));
+const EntryForm = dynamic(() => import("../features/transactions/EntryForm").then(m => m.EntryForm));
+const TransactionDetailModal = dynamic(
+    () => import("../features/transactions/TransactionDetailModal").then(m => m.TransactionDetailModal)
+);
+const MasterForm = dynamic(() => import("../features/masters/MasterForm").then(m => m.MasterForm));
+const CategoryEdit = dynamic(() => import("../features/masters/CategoryEdit").then(m => m.CategoryEdit));
+const ReviewModal = dynamic(() => import("../features/reviews/ReviewModal").then(m => m.ReviewModal));
 
 type Dialog =
     | "login"
@@ -101,241 +72,46 @@ type Dialog =
     | "receipt"
     | null;
 
-export default function Page() {
-    const [month, setMonth] = useState("");
-    const [page, setPage] = useState<Page>("home");
-    const [data, setData] = useState<Data | null>(null);
-    const [demoMode, setDemoMode] = useState(true);
-    const [authed, setAuthed] = useState(false);
-    const [ready, setReady] = useState(false);
-    const [refresh, setRefresh] = useState(0);
-    const [error, setError] = useState("");
-    const [loading, setLoading] = useState(false);
-    const [theme, setTheme] = useState<"light" | "dark">("light");
-    const [fabOpen, setFabOpen] = useState(false);
+type EntryPreset = {
+    date?: string;
+    kind?: Transaction["kind"];
+    account_id?: string;
+    autoScan?: boolean;
+};
 
+export default function SamSakuApp() {
+    const { theme, applyTheme } = useTheme();
+    const { authed, demoMode, ready, markConnected, logout } = useAuth();
+    const { month, pickMonth, data, loading, error, setError, refresh, lastFetchedAt } = useLedgerData({
+        ready,
+        demoMode,
+    });
+
+    const [page, setPage] = useState<Page>("home");
+    const [menuOpen, setMenuOpen] = useState(false);
+    const [fabOpen, setFabOpen] = useState(false);
     const [dialog, setDialog] = useState<Dialog>(null);
-    const [menu, setMenu] = useState(false);
+    const [notice, setNotice] = useState("");
+
     const [filter, setFilter] = useState("");
     const [accountFilter, setAccountFilter] = useState("");
     const [search, setSearch] = useState("");
-    const [doc, setDoc] = useState<Transaction | null>(null);
-    const [rev, setRev] = useState<Review | null>(null);
-    const [notice, setNotice] = useState("");
-    const [selectedCategory, setSelectedCategory] = useState<Data["categories"][number] | null>(null);
+
+    const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+    const [selectedReview, setSelectedReview] = useState<Review | null>(null);
+    const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
     const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
-    const [entryPreset, setEntryPreset] = useState<{
-        date?: string;
-        kind?: Transaction["kind"];
-        account_id?: string;
-        autoScan?: boolean;
-    }>({});
-    const [confirmDeleteTx, setConfirmDeleteTx] = useState(false);
-    const [deletingTx, setDeletingTx] = useState(false);
-    const [live, setLive] = useState(false);
+    const [entryPreset, setEntryPreset] = useState<EntryPreset>({});
 
-    const main = useRef<HTMLElement>(null);
-    const loadedMonth = useRef("");
-    const userPickedMonth = useRef(false);
-    const silentRefresh = useRef(false);
-
-    function applyTheme(next: "light" | "dark") {
-        setTheme(next);
-        if (typeof document !== "undefined") {
-            document.documentElement.setAttribute("data-theme", next);
-            try {
-                localStorage.setItem("samsaku-theme", next);
-            } catch {}
-        }
-    }
-
-    useEffect(() => {
-        setMonth(today().slice(0, 7));
-        try {
-            const savedTheme = localStorage.getItem("samsaku-theme");
-            if (savedTheme === "dark" || savedTheme === "light") {
-                applyTheme(savedTheme);
-            }
-        } catch {}
-
-        const sb = supabase();
-        let alive = true;
-        const listen = sb?.auth.onAuthStateChange((_ev, session) => {
-            if (alive) {
-                const ok = !!session || (allowDev() && !!getSavedToken());
-                setAuthed(ok);
-                setDemoMode(!ok);
-                setReady(true);
-            }
-        });
-        if (!sb) {
-            const ok = allowDev() && !!getSavedToken();
-            setAuthed(ok);
-            setDemoMode(!ok);
-            setReady(true);
-        }
-        if ("serviceWorker" in navigator && process.env.NODE_ENV === "production")
-            navigator.serviceWorker.register("/sw.js").catch(() => {});
-        return () => {
-            alive = false;
-            listen?.data.subscription.unsubscribe();
-        };
-    }, []);
-
-    useEffect(() => {
-        if (!month || !ready) return;
-        let valid = true;
-        const isSilent = silentRefresh.current && loadedMonth.current === month;
-        silentRefresh.current = false;
-        setError("");
-        if (!isSilent) {
-            if (loadedMonth.current !== month) setData(null);
-            setLoading(true);
-        }
-
-        get<Settings>("/settings")
-            .catch(() => ({ monthly_start_day: 1, weekly_start_day: 1, default_account_id: null }))
-            .then(settings => {
-                const startDay = settings.monthly_start_day || 1;
-                const activeCycleMonth = cycleMonthForDate(today(), startDay);
-                if (!userPickedMonth.current && activeCycleMonth !== month) {
-                    if (valid) setMonth(activeCycleMonth);
-                    return null;
-                }
-                const range = period(month, startDay);
-                const q = "?" + new URLSearchParams(range);
-                return Promise.all([
-                    Promise.resolve(settings),
-                    get<Data["accounts"]>("/accounts"),
-                    get<Data["categories"]>("/categories"),
-                    get<Data["reviews"]>("/reviews"),
-                    get<Budget[]>("/budgets" + q),
-                    get<Data["summary"]>("/summary" + q),
-                    get<Data["connections"]>("/connections"),
-                ]);
-            })
-            .then(res => {
-                if (!res || !valid) return;
-                const [settings, accounts, categories, reviews, budgets, summary, connections] = res;
-                loadedMonth.current = month;
-                setData({
-                    accounts,
-                    categories,
-                    transactions: summary.transactions,
-                    reviews,
-                    budgets: summary.budgets || budgets,
-                    settings,
-                    summary,
-                    connections,
-                });
-            })
-            .catch(e => {
-                if (valid && !isSilent) setError(e.message);
-            })
-            .finally(() => {
-                if (valid && !isSilent) setLoading(false);
-            });
-        return () => {
-            valid = false;
-        };
-    }, [month, ready, demoMode, refresh]);
-
-    useEffect(() => {
-        if (!ready || !authed || demoMode) {
-            setLive(false);
-            return;
-        }
-        const url = wsEndpoint();
-        if (!url) return;
-        let active = true;
-        let ws: WebSocket | null = null;
-        let retryDelay = 2000;
-        let retryTimer: ReturnType<typeof setTimeout> | null = null;
-        let pingTimer: ReturnType<typeof setInterval> | null = null;
-
-        const triggerSilentRefresh = (msg?: string) => {
-            silentRefresh.current = true;
-            setRefresh(v => v + 1);
+    const handleRealtimeSync = useCallback(
+        (msg?: string) => {
+            refresh(true);
             if (msg) setNotice(msg);
-        };
+        },
+        [refresh]
+    );
 
-        const connect = async () => {
-            if (!active) return;
-            const creds = await getAuthCredentials();
-            if (!active || !creds) return;
-            try {
-                ws = new WebSocket(url);
-            } catch {
-                scheduleReconnect();
-                return;
-            }
-            ws.onopen = () => {
-                if (!active || !ws) return;
-                ws.send(JSON.stringify({ type: "auth", ...creds }));
-            };
-            ws.onmessage = ev => {
-                if (!active) return;
-                try {
-                    const msg = JSON.parse(String(ev.data || "{}"));
-                    if (msg.type === "connected") {
-                        setLive(true);
-                        retryDelay = 2000;
-                        if (pingTimer) clearInterval(pingTimer);
-                        pingTimer = setInterval(() => {
-                            if (ws && ws.readyState === WebSocket.OPEN) {
-                                ws.send(JSON.stringify({ type: "ping" }));
-                            }
-                        }, 25000);
-                    } else if (msg.type === "ping") {
-                        ws?.send(JSON.stringify({ type: "pong" }));
-                    } else if (msg.type === "sync") {
-                        const toastMsg =
-                            typeof msg.message === "string" && msg.message.trim() ? msg.message.trim() : undefined;
-                        triggerSilentRefresh(toastMsg);
-                    }
-                } catch {}
-            };
-            ws.onclose = () => {
-                if (!active) return;
-                setLive(false);
-                if (pingTimer) {
-                    clearInterval(pingTimer);
-                    pingTimer = null;
-                }
-                scheduleReconnect();
-            };
-            ws.onerror = () => {
-                ws?.close();
-            };
-        };
-
-        const scheduleReconnect = () => {
-            if (!active || retryTimer) return;
-            retryTimer = setTimeout(() => {
-                retryTimer = null;
-                retryDelay = Math.min(retryDelay * 1.5, 15000);
-                connect();
-            }, retryDelay);
-        };
-
-        const onVisible = () => {
-            if (document.visibilityState === "visible") {
-                triggerSilentRefresh();
-                if (!ws || ws.readyState === WebSocket.CLOSED) connect();
-            }
-        };
-
-        connect();
-        document.addEventListener("visibilitychange", onVisible);
-        return () => {
-            active = false;
-            setLive(false);
-            document.removeEventListener("visibilitychange", onVisible);
-            if (retryTimer) clearTimeout(retryTimer);
-            if (pingTimer) clearInterval(pingTimer);
-            ws?.close();
-        };
-    }, [ready, authed, demoMode]);
+    const { live } = useRealtimeSync({ ready, authed, demoMode, lastFetchedAt, onSync: handleRealtimeSync });
 
     useEffect(() => {
         if (!notice) return;
@@ -343,9 +119,9 @@ export default function Page() {
         return () => clearTimeout(timer);
     }, [notice]);
 
-    function nav(p: Page) {
-        setPage(p);
-        setMenu(false);
+    function nav(nextPage: Page) {
+        setPage(nextPage);
+        setMenuOpen(false);
         setFabOpen(false);
         setFilter("");
         setAccountFilter("");
@@ -353,69 +129,40 @@ export default function Page() {
         window.scrollTo({ top: 0 });
     }
 
-    function write(d: Dialog) {
+    function openDialog(nextDialog: Dialog) {
         setFabOpen(false);
-        setDialog(d);
+        setDialog(nextDialog);
     }
 
-    function openEntry(
-        opts: {
-            date?: string;
-            kind?: Transaction["kind"];
-            account_id?: string;
-            autoScan?: boolean;
-        } = {}
-    ) {
+    function openEntry(opts: EntryPreset = {}) {
         setFabOpen(false);
         setEntryPreset(opts);
         setDialog(opts.autoScan ? "receipt" : "entry");
     }
 
-    function done() {
+    function finishMutation(message = "Perubahan tersimpan.") {
         setDialog(null);
-        setDoc(null);
+        setSelectedTx(null);
         setSelectedAccount(null);
         setSelectedCategory(null);
-        setConfirmDeleteTx(false);
-        setRefresh(v => v + 1);
-        setNotice("Perubahan tersimpan.");
+        setSelectedReview(null);
+        refresh();
+        setNotice(message);
     }
 
-    const detail = (t: Transaction) => {
-        setDoc(t);
-        setConfirmDeleteTx(false);
-        setDialog("detail");
-    };
-
-    async function deleteCurrentTx() {
-        if (!doc) return;
-        setDeletingTx(true);
-        try {
-            await del("/transactions/" + doc.id);
-            done();
-        } catch (e) {
-            setError(e instanceof Error ? e.message : "Gagal menghapus transaksi.");
-        } finally {
-            setDeletingTx(false);
-        }
-    }
-
-    async function logout() {
-        const { error } = (await supabase()?.auth.signOut()) || {};
-        if (error) {
-            setNotice(error.message);
+    async function handleLogout() {
+        const errMsg = await logout();
+        if (errMsg) {
+            setNotice(errMsg);
             return;
         }
-        setSavedToken("");
-        setDoc(null);
-        setRev(null);
+        setSelectedTx(null);
+        setSelectedReview(null);
         setFilter("");
         setAccountFilter("");
         setSearch("");
-        setAuthed(false);
-        setDemoMode(true);
         setDialog(null);
-        setRefresh(v => v + 1);
+        refresh();
     }
 
     const dialogTitles: Record<Exclude<Dialog, null>, string> = {
@@ -436,167 +183,64 @@ export default function Page() {
         receipt: "Foto Struk (Auto-Fill)",
     };
 
-    function navContent() {
-        return (
-            <>
-                <div className="brand">
-                    <img src="/icon.svg" alt="" width="34" height="34" />
-                    <span>SamSaku</span>
-                </div>
-                <nav aria-label="Menu utama" className="side-links">
-                    {links.map(({ page: p, icon: Icon }, i) => (
-                        <button
-                            key={p}
-                            className={(page === p ? "active " : "") + (i === 4 ? "section-break" : "")}
-                            aria-current={page === p ? "page" : undefined}
-                            onClick={() => nav(p)}
-                        >
-                            <Icon size={18} strokeWidth={1.8} />
-                            {labels[p]}
-                        </button>
-                    ))}
-                </nav>
-                <div className="sidebar-footer">
-                    <button
-                        onClick={() => {
-                            setMenu(false);
-                            if (authed) logout();
-                            else setDialog("login");
-                        }}
-                    >
-                        {authed ? <LogOut size={17} /> : <LogIn size={17} />}{" "}
-                        {authed ? "Keluar dari server" : "Hubungkan server"}
-                    </button>
-                </div>
-            </>
-        );
-    }
-
     const startDay = data?.settings?.monthly_start_day || 1;
 
     return (
         <div className="app-shell">
-            <aside className="sidebar">{navContent()}</aside>
-            {menu && (
-                <Modal title="Navigasi SamSaku" onClose={() => setMenu(false)}>
-                    <div className="mobile-side">{navContent()}</div>
+            <aside className="sidebar">
+                <SidebarNav
+                    page={page}
+                    authed={authed}
+                    onNav={nav}
+                    onAuthAction={() => (authed ? handleLogout() : setDialog("login"))}
+                />
+            </aside>
+
+            {menuOpen && (
+                <Modal title="Navigasi SamSaku" onClose={() => setMenuOpen(false)}>
+                    <div className="mobile-side">
+                        <SidebarNav
+                            page={page}
+                            authed={authed}
+                            onNav={nav}
+                            onAuthAction={() => {
+                                setMenuOpen(false);
+                                if (authed) handleLogout();
+                                else setDialog("login");
+                            }}
+                        />
+                    </div>
                 </Modal>
             )}
-            <main className="workspace" ref={main}>
-                <header className="topbar">
-                    <div className="crumb">
-                        <button
-                            className="icon-btn mobile-menu"
-                            aria-label="Buka navigasi"
-                            onClick={() => setMenu(true)}
-                        >
-                            <Menu size={21} />
-                        </button>
-                        <span className="desktop-crumb">SamSaku Wealth</span>
-                        <ChevronRight className="desktop-crumb" size={13} />
-                        <strong>{labels[page]}</strong>
-                    </div>
-                    <div className="top-actions">
-                        <button
-                            type="button"
-                            className="icon-btn"
-                            title={theme === "dark" ? "Ganti ke Mode Terang" : "Ganti ke Mode Gelap"}
-                            aria-label="Ganti tema tampilan"
-                            onClick={() => applyTheme(theme === "dark" ? "light" : "dark")}
-                        >
-                            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-                        </button>
-                        <button
-                            type="button"
-                            className="icon-btn"
-                            title="Pengaturan siklus & aplikasi"
-                            onClick={() => nav("settings")}
-                        >
-                            <SettingsIcon size={18} />
-                        </button>
-                        {ready && (
-                            <button onClick={() => setDialog("login")} className="account-badge">
-                                <span className={"dot " + (!demoMode ? (live ? "online live" : "online") : "")} />
-                                {demoMode ? "Sandbox" : live ? "Live" : "Terhubung"}
-                            </button>
-                        )}
-                        <span className="avatar" aria-hidden="true">
-                            S
-                        </span>
-                    </div>
-                </header>
+
+            <main className="workspace">
+                <Topbar
+                    page={page}
+                    theme={theme}
+                    ready={ready}
+                    demoMode={demoMode}
+                    live={live}
+                    onOpenMenu={() => setMenuOpen(true)}
+                    onToggleTheme={applyTheme}
+                    onOpenSettings={() => nav("settings")}
+                    onOpenLogin={() => setDialog("login")}
+                />
+
                 <div className="page-body">
-                    <div className="page-heading">
-                        <div>
-                            <h1>{page === "home" ? "Ringkasan Keuangan" : labels[page]}</h1>
-                            {["home", "transactions", "budgets", "stats"].includes(page) && month && (
-                                <p>
-                                    Siklus aktif: <b>{periodRangeLabel(month, startDay)}</b>
-                                    {startDay !== 1 ? ` (Mulai tgl ${startDay})` : ""}
-                                </p>
-                            )}
-                        </div>
-                        <div className="heading-actions">
-                            {["home", "transactions", "budgets", "stats"].includes(page) && month && (
-                                <div className="cycle-picker">
-                                    <button
-                                        type="button"
-                                        className="icon-btn"
-                                        aria-label="Periode sebelumnya"
-                                        onClick={() => {
-                                            userPickedMonth.current = true;
-                                            setMonth(shiftMonth(month, -1));
-                                        }}
-                                    >
-                                        <ChevronLeft size={17} />
-                                    </button>
-                                    <label className="month-btn">
-                                        <CalendarDays size={16} />
-                                        <span>{monthLabel(month)}</span>
-                                        <ChevronDown size={14} />
-                                        <input
-                                            aria-label="Bulan tampilan"
-                                            type="month"
-                                            value={month}
-                                            onChange={e => {
-                                                if (e.target.value) {
-                                                    userPickedMonth.current = true;
-                                                    setMonth(e.target.value);
-                                                }
-                                            }}
-                                        />
-                                    </label>
-                                    <button
-                                        type="button"
-                                        className="icon-btn"
-                                        aria-label="Periode berikutnya"
-                                        onClick={() => {
-                                            userPickedMonth.current = true;
-                                            setMonth(shiftMonth(month, 1));
-                                        }}
-                                    >
-                                        <ChevronRight size={17} />
-                                    </button>
-                                </div>
-                            )}
-                            {page === "home" && (
-                                <>
-                                    <button className="btn desktop-only-action" onClick={() => nav("stats")}>
-                                        <BarChart3 size={16} /> Statistik
-                                    </button>
-                                    <button className="btn primary desktop-only-action" onClick={() => openEntry()}>
-                                        <Plus size={16} /> Catat transaksi
-                                    </button>
-                                </>
-                            )}
-                        </div>
-                    </div>
+                    <PageHeader
+                        page={page}
+                        month={month}
+                        startDay={startDay}
+                        onPickMonth={m => pickMonth(m, true)}
+                        onOpenStats={() => nav("stats")}
+                        onNewEntry={() => openEntry()}
+                    />
 
                     {error && (
                         <div className="card">
                             <ErrorNote message={error} />
                             <div className="btns">
-                                <button className="btn" onClick={() => setRefresh(x => x + 1)}>
+                                <button className="btn" onClick={() => refresh()}>
                                     Coba lagi
                                 </button>
                                 <button className="btn" onClick={() => setDialog("login")}>
@@ -615,22 +259,25 @@ export default function Page() {
                     {data && (
                         <>
                             {page === "home" && (
-                                <Dashboard
+                                <DashboardView
                                     data={data}
                                     month={month}
-                                    onCategory={n => {
+                                    onCategory={name => {
                                         nav("transactions");
-                                        setFilter(n);
+                                        setFilter(name);
                                     }}
-                                    onTx={detail}
+                                    onTx={t => {
+                                        setSelectedTx(t);
+                                        openDialog("detail");
+                                    }}
                                     onAccounts={() => nav("masters")}
                                     onEditAccount={a => {
                                         setSelectedAccount(a);
-                                        write("edit-account");
+                                        openDialog("edit-account");
                                     }}
                                     onAddAccount={() => {
                                         setSelectedAccount(null);
-                                        write("account");
+                                        openDialog("account");
                                     }}
                                     onFilterAccount={accId => {
                                         nav("transactions");
@@ -638,9 +285,7 @@ export default function Page() {
                                     }}
                                     onNewTx={() => openEntry({ kind: "expense" })}
                                     onScanReceipt={() => openEntry({ kind: "expense", autoScan: true })}
-                                    onTransfer={fromAccId =>
-                                        openEntry({ kind: "transfer", account_id: fromAccId })
-                                    }
+                                    onTransfer={fromAccId => openEntry({ kind: "transfer", account_id: fromAccId })}
                                     onBudgets={() => nav("budgets")}
                                     onStats={() => nav("stats")}
                                     onAll={() => nav("transactions")}
@@ -658,7 +303,10 @@ export default function Page() {
                                     setAccountFilter={setAccountFilter}
                                     search={search}
                                     setSearch={setSearch}
-                                    onOpenTx={detail}
+                                    onOpenTx={t => {
+                                        setSelectedTx(t);
+                                        openDialog("detail");
+                                    }}
                                     onAddAtDate={(date, kind) => openEntry({ date, kind: kind || "expense" })}
                                     onScanAtDate={date => openEntry({ date, kind: "expense", autoScan: true })}
                                     onTransferAtDate={date => openEntry({ date, kind: "transfer" })}
@@ -674,14 +322,14 @@ export default function Page() {
                                         setFilter(catName);
                                     }}
                                     onDone={() => {
-                                        setRefresh(x => x + 1);
+                                        refresh();
                                         setNotice("Anggaran diperbarui.");
                                     }}
                                 />
                             )}
 
                             {page === "stats" && (
-                                <Statistics
+                                <StatisticsView
                                     data={data}
                                     month={month}
                                     onSelectCategory={catName => {
@@ -692,109 +340,46 @@ export default function Page() {
                             )}
 
                             {page === "reports" && (
-                                <Reports
+                                <ReportsView
                                     data={data}
                                     month={month}
                                     demoMode={demoMode}
-                                    setMonth={m => {
-                                        userPickedMonth.current = true;
-                                        setMonth(m);
-                                    }}
+                                    setMonth={m => pickMonth(m, true)}
                                 />
                             )}
 
                             {page === "import" && (
-                                <Importer
+                                <ImporterView
                                     data={data}
                                     demoMode={demoMode}
                                     onLogin={() => setDialog("login")}
-                                    onDone={() => setRefresh(x => x + 1)}
+                                    onDone={() => refresh()}
                                 />
                             )}
 
                             {page === "masters" && (
-                                <div className="two-cols">
-                                    <div className="stack">
-                                        <Accounts
-                                            data={data}
-                                            onEdit={a => {
-                                                setSelectedAccount(a);
-                                                write("edit-account");
-                                            }}
-                                            onTransfer={fromAccId =>
-                                                openEntry({ kind: "transfer", account_id: fromAccId })
-                                            }
-                                            onFilterAccount={accId => {
-                                                nav("transactions");
-                                                setAccountFilter(accId);
-                                            }}
-                                            onAdd={() => {
-                                                setSelectedAccount(null);
-                                                write("account");
-                                            }}
-                                        />
-                                        {data.connections && (
-                                            <section className="card">
-                                                <div className="section-title">
-                                                    <h2>Sumber transaksi otomatis</h2>
-                                                </div>
-                                                {data.connections.map(c => (
-                                                    <div key={c.source} className="paper-line">
-                                                        <span>{c.source.toUpperCase()}</span>
-                                                        <small>
-                                                            {c.last_received_at
-                                                                ? new Date(c.last_received_at).toLocaleString("id-ID", {
-                                                                      timeZone: "Asia/Jakarta",
-                                                                  })
-                                                                : "Belum ada bukti"}
-                                                        </small>
-                                                    </div>
-                                                ))}
-                                            </section>
-                                        )}
-                                    </div>
-                                    <section className="card">
-                                        <div className="section-title">
-                                            <h2>Kategori</h2>
-                                            <button
-                                                className="btn primary sm"
-                                                aria-label="Buat kategori"
-                                                onClick={() => write("category")}
-                                            >
-                                                <Plus size={14} /> Kategori
-                                            </button>
-                                        </div>
-                                        {(["income", "expense"] as const).map(k => (
-                                            <div key={k} className="master-group">
-                                                <h3 className={k === "income" ? "income" : "expense-amt"}>
-                                                    {kindLabels[k]}
-                                                </h3>
-                                                {data.categories
-                                                    .filter(c => c.kind === k)
-                                                    .map(c => (
-                                                        <button
-                                                            className="list-action master-cat-row"
-                                                            key={c.id}
-                                                            onClick={() => {
-                                                                setSelectedCategory(c);
-                                                                write("edit-category");
-                                                            }}
-                                                        >
-                                                            <span>
-                                                                {c.parent_id ? "↳ " : ""}
-                                                                {c.name}
-                                                                {c.archived ? " · Diarsipkan" : ""}
-                                                            </span>
-                                                            <Pencil size={14} className="wallet-edit-icon" />
-                                                        </button>
-                                                    ))}
-                                            </div>
-                                        ))}
-                                        <button className="text-btn" onClick={() => nav("import")}>
-                                            <FileSpreadsheet size={15} /> Impor master dari Excel
-                                        </button>
-                                    </section>
-                                </div>
+                                <MastersView
+                                    data={data}
+                                    onEditAccount={a => {
+                                        setSelectedAccount(a);
+                                        openDialog("edit-account");
+                                    }}
+                                    onAddAccount={() => {
+                                        setSelectedAccount(null);
+                                        openDialog("account");
+                                    }}
+                                    onTransfer={fromAccId => openEntry({ kind: "transfer", account_id: fromAccId })}
+                                    onFilterAccount={accId => {
+                                        nav("transactions");
+                                        setAccountFilter(accId);
+                                    }}
+                                    onAddCategory={() => openDialog("category")}
+                                    onEditCategory={c => {
+                                        setSelectedCategory(c);
+                                        openDialog("edit-category");
+                                    }}
+                                    onOpenImport={() => nav("import")}
+                                />
                             )}
 
                             {page === "settings" && (
@@ -806,110 +391,38 @@ export default function Page() {
                                     onToggleTheme={applyTheme}
                                     onDone={nextStartDay => {
                                         if (typeof nextStartDay === "number") {
-                                            userPickedMonth.current = false;
-                                            setMonth(cycleMonthForDate(today(), nextStartDay));
+                                            pickMonth(cycleMonthForDate(today(), nextStartDay), false);
                                         }
-                                        setRefresh(x => x + 1);
+                                        refresh();
                                         setNotice("Pengaturan disimpan.");
                                     }}
                                 />
                             )}
 
                             {page === "reviews" && (
-                                <section className="card">
-                                    <div className="section-title">
-                                        <h2>Bukti menunggu keputusan</h2>
-                                        <Inbox size={18} />
-                                    </div>
-                                    {data.reviews.length ? (
-                                        data.reviews.map(r => (
-                                            <button
-                                                key={r.id}
-                                                className="list-action"
-                                                onClick={() => {
-                                                    setRev(r);
-                                                    setDialog("review");
-                                                }}
-                                            >
-                                                <strong>{r.source}</strong>
-                                                <small>{r.text}</small>
-                                            </button>
-                                        ))
-                                    ) : (
-                                        <p className="empty">Semua bukti sudah ditinjau.</p>
-                                    )}
-                                </section>
+                                <ReviewsView
+                                    reviews={data.reviews}
+                                    onSelect={r => {
+                                        setSelectedReview(r);
+                                        openDialog("review");
+                                    }}
+                                />
                             )}
                         </>
                     )}
                 </div>
             </main>
 
-            {/* Global Floating Action Button (FAB) */}
             {data && (
-                <div className="fab-container">
-                    {fabOpen && (
-                        <div className="fab-menu">
-                            <button
-                                type="button"
-                                className="fab-action"
-                                onClick={() => openEntry({ kind: "expense", autoScan: true })}
-                            >
-                                <Camera size={16} /> Foto Struk (Auto-Fill)
-                            </button>
-                            {data.accounts.length >= 2 && (
-                                <button
-                                    type="button"
-                                    className="fab-action"
-                                    onClick={() => openEntry({ kind: "transfer" })}
-                                >
-                                    <ArrowLeftRight size={16} /> Transfer Antar Dompet
-                                </button>
-                            )}
-                            <button
-                                type="button"
-                                className="fab-action"
-                                onClick={() => openEntry({ kind: "income" })}
-                            >
-                                <Plus size={16} /> Catat Pemasukan
-                            </button>
-                            <button
-                                type="button"
-                                className="fab-action primary"
-                                onClick={() => openEntry({ kind: "expense" })}
-                            >
-                                <Plus size={16} /> Catat Pengeluaran
-                            </button>
-                        </div>
-                    )}
-                    <button
-                        type="button"
-                        className={"fab-main " + (fabOpen ? "open" : "")}
-                        aria-label="Aksi cepat transaksi"
-                        onClick={() => setFabOpen(v => !v)}
-                    >
-                        {fabOpen ? <X size={22} /> : <Plus size={22} />}
-                    </button>
-                </div>
+                <QuickFab
+                    open={fabOpen}
+                    canTransfer={data.accounts.length >= 2}
+                    onToggle={() => setFabOpen(v => !v)}
+                    onOpenEntry={opts => openEntry(opts)}
+                />
             )}
 
-            <nav className="bottom-nav" aria-label="Navigasi bawah">
-                {links.slice(0, 4).map(({ page: p, icon: Icon }) => (
-                    <button
-                        aria-current={page === p ? "page" : undefined}
-                        key={p}
-                        className={page === p ? "active" : ""}
-                        onClick={() => nav(p)}
-                    >
-                        <Icon size={19} />
-                        {labels[p]}
-                    </button>
-                ))}
-                <button onClick={() => setMenu(true)} aria-label="Menu lainnya">
-                    <Menu size={19} />
-                    Lainnya
-                </button>
-            </nav>
+            <BottomNav page={page} onNav={nav} onOpenMenu={() => setMenuOpen(true)} />
 
             {notice && (
                 <div className="toast" role="status">
@@ -921,24 +434,17 @@ export default function Page() {
                 <Modal
                     title={dialogTitles[dialog]}
                     onClose={() => setDialog(null)}
-                    wide={
-                        dialog === "entry" ||
-                        dialog === "edit-entry" ||
-                        dialog === "receipt" ||
-                        dialog === "account" ||
-                        dialog === "edit-account"
-                    }
+                    wide={["entry", "edit-entry", "receipt", "account", "edit-account"].includes(dialog)}
                     key={dialog}
                 >
                     {dialog === "login" && (
-                        <Login
+                        <LoginModal
                             authed={authed}
-                            onLogout={logout}
-                            onLocal={() => {
-                                setAuthed(true);
-                                setDemoMode(false);
+                            onLogout={handleLogout}
+                            onConnected={() => {
+                                markConnected();
                                 setDialog(null);
-                                setRefresh(v => v + 1);
+                                refresh();
                             }}
                         />
                     )}
@@ -954,16 +460,16 @@ export default function Page() {
                                         account_id: entryPreset.account_id,
                                     }}
                                     autoScan={entryPreset.autoScan}
-                                    onDone={done}
+                                    onDone={() => finishMutation()}
                                 />
                             )}
 
-                            {dialog === "edit-entry" && doc && (
-                                <EntryForm data={data} tx={doc} onDone={done} />
+                            {dialog === "edit-entry" && selectedTx && (
+                                <EntryForm data={data} tx={selectedTx} onDone={() => finishMutation()} />
                             )}
 
                             {dialog === "account" && (
-                                <MasterForm mode="account" data={data} onDone={done} />
+                                <MasterForm mode="account" data={data} onDone={() => finishMutation()} />
                             )}
 
                             {dialog === "edit-account" && selectedAccount && (
@@ -971,135 +477,29 @@ export default function Page() {
                                     mode="account"
                                     data={data}
                                     account={selectedAccount}
-                                    onDone={done}
+                                    onDone={() => finishMutation()}
                                 />
                             )}
 
                             {dialog === "category" && (
-                                <MasterForm mode="category" data={data} onDone={done} />
+                                <MasterForm mode="category" data={data} onDone={() => finishMutation()} />
                             )}
 
-                            {dialog === "detail" && doc && (
-                                <div className="detail">
-                                    <div
-                                        className={
-                                            "detail-amount " +
-                                            (doc.kind === "income" || doc.kind === "refund"
-                                                ? "income"
-                                                : doc.kind === "transfer"
-                                                  ? "transfer-amt"
-                                                  : "expense-amt")
-                                        }
-                                    >
-                                        {doc.kind === "income" || doc.kind === "refund"
-                                            ? "+"
-                                            : doc.kind === "transfer"
-                                              ? "⇄ "
-                                              : "−"}
-                                        {money(doc.amount)}
-                                    </div>
-                                    <h3>{doc.description || kindLabels[doc.kind]}</h3>
-                                    {[
-                                        ["Tanggal", doc.date],
-                                        ["Jenis", kindLabels[doc.kind]],
-                                        [
-                                            doc.kind === "transfer" ? "Dompet asal" : "Dompet",
-                                            doc.account_name ||
-                                                data.accounts.find(a => a.id === doc.account_id)?.name,
-                                        ],
-                                        [
-                                            "Dompet tujuan",
-                                            doc.to_account_name ||
-                                                data.accounts.find(a => a.id === doc.to_account_id)?.name,
-                                        ],
-                                        [
-                                            "Kategori",
-                                            doc.category_name ||
-                                                data.categories.find(c => c.id === doc.category_id)?.name,
-                                        ],
-                                        ["Biaya admin", doc.fee ? money(doc.fee) : null],
-                                        ["Sumber", doc.source],
-                                    ].map(([key, val]) =>
-                                        val ? (
-                                            <div className="paper-line" key={key}>
-                                                <span>{key}</span>
-                                                <b>{val}</b>
-                                            </div>
-                                        ) : null
-                                    )}
-
-                                    {doc.splits && doc.splits.filter(s => s.role !== "fee").length > 1 && (
-                                        <div className="split-detail-box">
-                                            <strong>Rincian Split Kategori</strong>
-                                            {doc.splits
-                                                .filter(s => s.role !== "fee")
-                                                .map((s, idx) => {
-                                                    const cName =
-                                                        s.category_name ||
-                                                        data.categories.find(c => c.id === s.category_id)?.name ||
-                                                        "Belum dikategorikan";
-                                                    return (
-                                                        <div className="paper-line" key={idx}>
-                                                            <span>{cName}</span>
-                                                            <b>{money(Math.abs(s.amount))}</b>
-                                                        </div>
-                                                    );
-                                                })}
-                                        </div>
-                                    )}
-
-                                    <div className="btns" style={{ marginTop: 18 }}>
-                                        <button
-                                            type="button"
-                                            className="btn primary"
-                                            onClick={() => write("edit-entry")}
-                                        >
-                                            <Pencil size={15} /> Ubah transaksi
-                                        </button>
-                                        {!confirmDeleteTx && (
-                                            <button
-                                                type="button"
-                                                className="btn danger-outline"
-                                                onClick={() => setConfirmDeleteTx(true)}
-                                            >
-                                                <Trash2 size={15} /> Hapus
-                                            </button>
-                                        )}
-                                    </div>
-
-                                    {confirmDeleteTx && (
-                                        <div className="danger-box" style={{ marginTop: 14 }}>
-                                            <strong>Hapus transaksi ini?</strong>
-                                            <p className="muted">
-                                                Tindakan ini akan menghapus transaksi dan memperbarui saldo dompet.
-                                            </p>
-                                            <div className="btns">
-                                                <button
-                                                    type="button"
-                                                    className="btn danger"
-                                                    disabled={deletingTx}
-                                                    onClick={deleteCurrentTx}
-                                                >
-                                                    {deletingTx ? "Menghapus…" : "Ya, hapus"}
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    className="btn"
-                                                    onClick={() => setConfirmDeleteTx(false)}
-                                                >
-                                                    Batal
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
+                            {dialog === "detail" && selectedTx && (
+                                <TransactionDetailModal
+                                    doc={selectedTx}
+                                    data={data}
+                                    onEdit={() => openDialog("edit-entry")}
+                                    onDeleted={() => finishMutation("Transaksi dihapus.")}
+                                    onError={msg => setError(msg)}
+                                />
                             )}
 
                             {dialog === "edit-category" && selectedCategory && (
                                 <CategoryEdit
                                     category={selectedCategory}
                                     categories={data.categories}
-                                    done={done}
+                                    done={() => finishMutation()}
                                 />
                             )}
 
@@ -1108,199 +508,17 @@ export default function Page() {
                                     data={data}
                                     initial={{ date: entryPreset.date, kind: "expense" }}
                                     autoScan={true}
-                                    onDone={done}
+                                    onDone={() => finishMutation()}
                                 />
                             )}
 
-                            {dialog === "review" && rev && <ReviewItem r={rev} data={data} done={done} />}
+                            {dialog === "review" && selectedReview && (
+                                <ReviewModal r={selectedReview} data={data} done={() => finishMutation()} />
+                            )}
                         </>
                     )}
                 </Modal>
             )}
-        </div>
-    );
-}
-
-function ReviewItem({ r, data, done }: { r: Review; data: Data; done: () => void }) {
-    const [id, setId] = useState("");
-    const [error, setError] = useState("");
-    const [busy, setBusy] = useState(false);
-    async function act(action: string) {
-        setBusy(true);
-        setError("");
-        try {
-            await post("/reviews/" + r.id + "/resolve", { action, transaction_id: id || undefined });
-            done();
-        } catch (e) {
-            setError(e instanceof Error ? e.message : "Gagal menyimpan.");
-        } finally {
-            setBusy(false);
-        }
-    }
-    return (
-        <div className="form">
-            <p className="evidence">{r.text}</p>
-            <Field label="Transaksi terkait">
-                <select value={id} onChange={e => setId(e.target.value)}>
-                    <option value="">Pilih transaksi</option>
-                    {data.transactions.map(t => (
-                        <option key={t.id} value={t.id}>
-                            {t.date} · {t.description} · {money(t.amount)}
-                        </option>
-                    ))}
-                </select>
-            </Field>
-            <div className="btns">
-                <button className="btn primary" disabled={busy || !id} onClick={() => act("link")}>
-                    Tautkan
-                </button>
-                <button className="btn" disabled={busy} onClick={() => act("ignore")}>
-                    Abaikan bukti
-                </button>
-            </div>
-            <details>
-                <summary>Catat sebagai transaksi baru</summary>
-                <EntryForm
-                    data={data}
-                    onDone={done}
-                    initial={{
-                        ...r.parsed,
-                        description: r.parsed?.description || r.parsed?.merchant || r.text.slice(0, 500),
-                    }}
-                    submitPath={"/reviews/" + r.id + "/resolve"}
-                    wrap={transaction => ({ action: "post", transaction })}
-                />
-            </details>
-            <ErrorNote message={error} />
-        </div>
-    );
-}
-
-function Login({
-    authed,
-    onLogout,
-    onLocal,
-}: {
-    authed: boolean;
-    onLogout: () => void;
-    onLocal: () => void;
-}) {
-    const [email, setEmail] = useState("");
-    const [password, setPassword] = useState("");
-    const [key, setKey] = useState("");
-    const [busy, setBusy] = useState(false);
-    const [error, setError] = useState("");
-
-    async function emailLogin(e: React.FormEvent) {
-        e.preventDefault();
-        setBusy(true);
-        setError("");
-        try {
-            const sb = supabase();
-            if (!sb) throw new Error("Koneksi Supabase belum dikonfigurasi.");
-            const { error } = await sb.auth.signInWithPassword({
-                email: email.trim(),
-                password,
-            });
-            if (error) throw error;
-            onLocal();
-        } catch (e) {
-            setError(e instanceof Error ? e.message : "Email atau password tidak sesuai.");
-        } finally {
-            setBusy(false);
-        }
-    }
-
-    async function google() {
-        setBusy(true);
-        setError("");
-        try {
-            const sb = supabase();
-            if (!sb) throw new Error("Login Google belum dikonfigurasi pada aplikasi ini.");
-            const { error } = await sb.auth.signInWithOAuth({
-                provider: "google",
-                options: { redirectTo: location.origin + "/" },
-            });
-            if (error) throw error;
-        } catch (e) {
-            setError(e instanceof Error ? e.message : "Login gagal.");
-            setBusy(false);
-        }
-    }
-    async function local() {
-        setError("");
-        setBusy(true);
-        try {
-            setSavedToken(key.trim());
-            await get("/accounts");
-            onLocal();
-        } catch (e) {
-            setSavedToken("");
-            setError(e instanceof Error ? e.message : "Password/Token akses tidak sesuai.");
-        } finally {
-            setBusy(false);
-        }
-    }
-    return authed ? (
-        <div className="form">
-            <p className="muted">Terhubung ke database PostgreSQL SamSaku.</p>
-            <button className="btn" onClick={onLogout}>
-                Keluar ke Sandbox Interaktif
-            </button>
-        </div>
-    ) : (
-        <div className="form">
-            <p className="muted">
-                Masuk ke akun pemilik untuk menyinkronkan data dengan database PostgreSQL.
-            </p>
-            {supabase() && (
-                <>
-                    <form className="form" onSubmit={emailLogin}>
-                        <Field label="Email pemilik">
-                            <input
-                                type="email"
-                                required
-                                value={email}
-                                onChange={e => setEmail(e.target.value)}
-                                placeholder="nama@email.com"
-                            />
-                        </Field>
-                        <Field label="Password">
-                            <input
-                                type="password"
-                                required
-                                value={password}
-                                onChange={e => setPassword(e.target.value)}
-                                placeholder="••••••••"
-                            />
-                        </Field>
-                        <button type="submit" disabled={busy || !email || !password} className="btn primary">
-                            <LogIn size={16} /> Masuk dengan Email
-                        </button>
-                    </form>
-                    <button type="button" disabled={busy} className="btn" onClick={google}>
-                        <LogIn size={16} /> Masuk dengan Google (Opsional)
-                    </button>
-                </>
-            )}
-            {allowDev() && (
-                <>
-                    <Field label="Password / Token Akses Server (SAMSAKU_DEV_TOKEN)">
-                        <input
-                            type="password"
-                            value={key}
-                            autoComplete="off"
-                            onChange={e => setKey(e.target.value)}
-                            placeholder="Masukkan password/token akses Anda"
-                        />
-                    </Field>
-                    <button disabled={busy || !key} className="btn primary" onClick={local}>
-                        Hubungkan Server SamSaku
-                    </button>
-                </>
-            )}
-            {!supabase() && !allowDev() && <p>Login belum dikonfigurasi. Atur koneksi Supabase pada deployment.</p>}
-            <ErrorNote message={error} />
         </div>
     );
 }

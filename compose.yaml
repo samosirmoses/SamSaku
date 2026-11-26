@@ -29,6 +29,7 @@ services:
   web:
     build:
       context: ./web
+      target: local
       args:
         NEXT_PUBLIC_API_URL: http://localhost:${SAMSAKU_API_PORT:-8000}/v1
     depends_on: [api]

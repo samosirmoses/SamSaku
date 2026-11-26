@@ -1,3 +1,15 @@
+import {
+    compactMoney,
+    formatDots,
+    fullDate,
+    money,
+    monthLabel,
+    parseDigits,
+    shortDate,
+} from "./format";
+
+export { compactMoney, formatDots, fullDate, money, monthLabel, parseDigits, shortDate };
+
 export type Account = {
     id: string;
     code: string;
@@ -106,6 +118,7 @@ export type Summary = {
 };
 
 export type Data = {
+    month?: string;
     accounts: Account[];
     categories: Category[];
     transactions: Transaction[];
@@ -119,35 +132,7 @@ export type Data = {
     }[];
 };
 
-export const money = (v: number) =>
-    new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 })
-        .format(v)
-        .replace(/\s/g, "");
-
-export const compactMoney = (v: number) => {
-    const abs = Math.abs(v);
-    const sign = v < 0 ? "−" : "";
-    if (abs >= 1_000_000_000) return sign + "Rp" + (abs / 1_000_000_000).toFixed(1).replace(/\.0$/, "") + "M";
-    if (abs >= 1_000_000) return sign + "Rp" + (abs / 1_000_000).toFixed(1).replace(/\.0$/, "") + "jt";
-    if (abs >= 1_000) return sign + "Rp" + Math.round(abs / 1_000) + "rb";
-    return money(v);
-};
-
-export const shortDate = (d: string) =>
-    new Date(d.slice(0, 10) + "T12:00:00").toLocaleDateString("id-ID", { day: "numeric", month: "short" });
-
-export const fullDate = (d: string) =>
-    new Date(d.slice(0, 10) + "T12:00:00").toLocaleDateString("id-ID", {
-        weekday: "long",
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-    });
-
-export const monthLabel = (m: string) =>
-    new Date(m + "-01T12:00:00").toLocaleDateString("id-ID", { month: "long", year: "numeric" });
-
-export function today() {
+export function today(): string {
     return new Intl.DateTimeFormat("en-CA", {
         timeZone: "Asia/Jakarta",
         year: "numeric",
@@ -172,7 +157,6 @@ export function period(month: string, startDay = 1): { start: string; end: strin
         return { start: fmtIso(y, m, 1), end: fmtIso(y, m, last) };
     }
     if (clampedStart >= 15) {
-        // Majority of cycle days fall in `month` (e.g. startDay=26, month=2026-10 -> 26 Sep – 25 Okt 2026)
         const prevY = m === 1 ? y - 1 : y;
         const prevM = m === 1 ? 12 : m - 1;
         const actualStartDay = Math.min(clampedStart, daysInMonth(prevY, prevM));
@@ -183,7 +167,6 @@ export function period(month: string, startDay = 1): { start: string; end: strin
         const end = fmtIso(endDate.getFullYear(), endDate.getMonth() + 1, endDate.getDate());
         return { start, end };
     }
-    // startDay 2..14: majority of cycle days fall in `month` starting in `month`
     const actualStartDay = Math.min(clampedStart, daysInMonth(y, m));
     const start = fmtIso(y, m, actualStartDay);
     const nextY = m === 12 ? y + 1 : y;
@@ -230,15 +213,16 @@ export function shiftMonth(month: string, delta: number): string {
     return `${ny}-${String(nm).padStart(2, "0")}`;
 }
 
-export function categoryMatches(t: Transaction, name: string, categories: Category[]) {
+export function categoryMatches(t: Transaction, name: string, categories: Category[]): boolean {
     if (!name) return true;
-    if (t.splits?.length)
+    if (t.splits?.length) {
         return t.splits.some(
             s =>
                 (s.role === "fee"
                     ? "Biaya admin"
                     : categories.find(c => c.id === s.category_id)?.name || "Belum dikategorikan") === name
         );
+    }
     return (t.category_name || categories.find(c => c.id === t.category_id)?.name || "Belum dikategorikan") === name;
 }
 
@@ -260,11 +244,11 @@ export const accountKindLabels: Record<string, string> = {
 export const weekdayNames = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
 export const weekdayShort = ["Min", "Sen", "Sel", "Rab", "Kam", "Jum", "Sab"];
 
-export function expense(t: Transaction) {
+export function expense(t: Transaction): number {
     return t.kind === "expense" ? t.amount : t.kind === "refund" ? -t.amount : t.kind === "transfer" ? t.fee || 0 : 0;
 }
 
-export function income(t: Transaction) {
+export function income(t: Transaction): number {
     return t.kind === "income" ? t.amount : 0;
 }
 

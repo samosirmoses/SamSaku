@@ -7,13 +7,15 @@ from openpyxl import Workbook
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from app.db import Base
-from app.jobs import ImportEntry, store_file
-from app.ledger import balance, summary
-from app.models import Account, Category, Transaction
-from app.ocr import extract
-from app.reports import report_csv
-from app.tools_api import Commit, Preview, RowKey, SheetMap, commit, preview
+from app.core.db import Base
+from app.models import Account, Category, ImportEntry, Transaction
+from app.routers.tools import commit, preview
+from app.schemas import Commit, Preview, RowKey, SheetMap
+from app.services.accounts import balance
+from app.services.jobs import store_file
+from app.services.receipt_text import extract, infer_category
+from app.services.reports import report_csv
+from app.services.summary import summary
 
 OWNER = "test-owner"
 
@@ -41,47 +43,53 @@ def job(db, sheets, kind):
 
 
 def test_master_parent_below_child_and_retry(db):
-    batch = job(db, {"categories":[["code","name","kind","parent"],["KOPI","Kopi","expense","FOOD"],
-        ["FOOD","Makanan","expense"]]}, "masters")
-    plan = Preview(sheets=[SheetMap(name="categories",entity="categories")])
-    result = preview(batch,plan,OWNER,db)
-    assert result["counts"] == {"new":2}
+    batch = job(
+        db,
+        {"categories": [["code", "name", "kind", "parent"], ["KOPI", "Kopi", "expense", "FOOD"], ["FOOD", "Makanan", "expense"]]},
+        "masters",
+    )
+    plan = Preview(sheets=[SheetMap(name="categories", entity="categories")])
+    result = preview(batch, plan, OWNER, db)
+    assert result["counts"] == {"new": 2}
     assert db.scalar(select(func.count()).select_from(Category)) == 0
     confirm = Commit(revision=result["revision"])
-    assert commit(batch,confirm,OWNER,db)["applied"] == 2
-    assert commit(batch,confirm,OWNER,db)["applied"] == 2
+    assert commit(batch, confirm, OWNER, db)["applied"] == 2
+    assert commit(batch, confirm, OWNER, db)["applied"] == 2
     assert db.scalar(select(func.count()).select_from(ImportEntry)) == 2
-    child = db.scalar(select(Category).where(Category.code=="KOPI"))
-    assert db.get(Category,child.parent_id).name == "Makanan"
+    child = db.scalar(select(Category).where(Category.code == "KOPI"))
+    assert db.get(Category, child.parent_id).name == "Makanan"
 
 
 def test_anchor_split_and_similar_requires_consent(db):
-    bca = Account(owner_id=OWNER,name="BCA",code="BCA",opening_balance=5000000,opening_date=date(2026,1,1))
+    bca = Account(owner_id=OWNER, name="BCA", code="BCA", opening_balance=5000000, opening_date=date(2026, 1, 1))
     db.add(bca)
     db.commit()
-    lines = [["date","kind","amount","account","reference"],["2025-12-20","expense",300000,"BCA","A"],
-             ["2026-01-01","expense",35000,"BCA","B"],["2026-01-01","expense",35000,"BCA","C"]]
-    batch = job(db, {"transactions":lines}, "transactions")
-    result = preview(batch, Preview(sheets=[SheetMap(name="transactions",entity="transactions")]), OWNER, db)
+    lines = [
+        ["date", "kind", "amount", "account", "reference"],
+        ["2025-12-20", "expense", 300000, "BCA", "A"],
+        ["2026-01-01", "expense", 35000, "BCA", "B"],
+        ["2026-01-01", "expense", 35000, "BCA", "C"],
+    ]
+    batch = job(db, {"transactions": lines}, "transactions")
+    result = preview(batch, Preview(sheets=[SheetMap(name="transactions", entity="transactions")]), OWNER, db)
     assert result["expense"] == 370000
-    assert result["impacts"] == {"BCA":-70000}
-    assert result["counts"] == {"new":2,"similar":1}
+    assert result["impacts"] == {"BCA": -70000}
+    assert result["counts"] == {"new": 2, "similar": 1}
     with pytest.raises(HTTPException):
-        commit(batch,Commit(revision=result["revision"]),OWNER,db)
+        commit(batch, Commit(revision=result["revision"]), OWNER, db)
     assert db.scalar(select(func.count()).select_from(Transaction)) == 0
-    args = Commit(revision=result["revision"],accept_similar=[RowKey(sheet="transactions",row=4)])
-    commit(batch,args,OWNER,db)
-    assert balance(db,bca) == 4930000
-    report = summary(db,OWNER,date(2025,12,1),date(2026,1,31))
+    args = Commit(revision=result["revision"], accept_similar=[RowKey(sheet="transactions", row=4)])
+    commit(batch, args, OWNER, db)
+    assert balance(db, bca) == 4930000
+    report = summary(db, OWNER, date(2025, 12, 1), date(2026, 1, 31))
     assert report["expense"] == 370000
     assert report_csv(report).decode("utf-8-sig").count("\r\n") == 4
 
 
 def test_receipt_chooses_total_and_handles_ambiguity():
     txt = "Kopi Senja\n12/11/2026\nSubtotal Rp40.000\nTOTAL Rp42.000\nTunai Rp50.000\nKembali Rp8.000"
-    assert extract(txt) == {"amount":42000,"date":"2026-11-12","merchant":"Kopi Senja","amount_options":[42000]}
+    assert extract(txt) == {"amount": 42000, "date": "2026-11-12", "merchant": "Kopi Senja", "amount_options": [42000]}
     assert extract(txt + "\nTotal Rp43.000")["amount"] is None
-    from app.receipt_text import infer_category
     cats = [
         {"id": "c-food", "name": "Makan & minum", "kind": "expense", "archived": False},
         {"id": "c-shop", "name": "Belanja", "kind": "expense", "archived": False},
@@ -90,4 +98,3 @@ def test_receipt_chooses_total_and_handles_ambiguity():
     assert infer_category(cats, [], txt, "Kopi Senja") == ("c-food", "Makan & minum")
     assert infer_category(cats, [], "Indomaret\n24 Nov 2026\nTotal Belanja Rp 55.000", "Indomaret") == ("c-shop", "Belanja")
     assert infer_category(cats, [], "SPBU Pertamina\nPertamax Rp 150.000", "SPBU Pertamina") == ("c-trans", "Transportasi")
-

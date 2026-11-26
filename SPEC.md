@@ -1,28 +1,91 @@
-# Spesifikasi SamSaku
+# Spesifikasi Produk SamSaku (Living Spec)
 
-SamSaku mencatat keuangan satu pemilik dalam rupiah. Pemilik memakai PWA yang sama di HP, tablet, dan laptop. APK Android hanya bertugas meneruskan notifikasi transaksi dari sumber yang dipilih.
+> **Status Dokumen:** Sumber kebenaran tunggal (*Single Source of Truth*) untuk aturan bisnis dan kapabilitas aplikasi SamSaku. Dokumen ini dijaga tetap sinkron dengan kode sesuai aturan di [AGENTS.md](AGENTS.md).
 
-## Pembukuan
+SamSaku adalah aplikasi pencatatan keuangan pribadi satu pemilik (*single-owner*) dalam mata uang Rupiah (IDR). Pemilik mengakses PWA yang sama di HP, tablet, dan desktop, sementara konektor Gmail, Telegram, dan APK Android meneruskan bukti transaksi ke API yang sama.
 
-- Satu transaksi memiliki satu atau beberapa perubahan saldo dan rincian nominal per kategori. Pendapatan dan pengeluaran dapat memakai kategori buatan pengguna. Jumlah rincian harus sama dengan nominal transaksi.
-- Transfer Rp100.000 dengan biaya Rp1.000 menghasilkan entri asal −Rp101.000 dan tujuan +Rp100.000. Pengeluaran dalam laporan bertambah Rp1.000. Refund terkait transaksi asal menurunkan pengeluaran pada periode pengembalian.
-- Saldo pembuka berlaku pada awal tanggal acuan per dompet. Bukti sebelum tanggal tersebut tetap masuk laporan historis. Saldo berjalan menghitung perubahan pada dan setelah tanggal acuan.
-- Waktu laporan menggunakan Asia/Jakarta. Nominal disimpan sebagai rupiah bulat dengan perhitungan eksak.
+---
 
-## Bukti, impor, dan alokasi
+## 1. Aturan Pembukuan (Core Ledger)
 
-- Bukti dari Gmail, GoPay, Telegram, atau foto melewati parser. Pencatatan otomatis memerlukan aturan sukses yang teruji, identitas sumber dan referensi yang memadai. Bukti ambigu menunggu tinjauan. Kemiripan nominal dan tanggal menjadi saran pencocokan.
-- Impor Excel menyediakan template dan pemetaan workbook sendiri, pratinjau perubahan, perlakuan duplikat, dan persetujuan sebelum publikasi. Satu batch yang disetujui dipublikasikan secara atomik. Transaksi, dompet, kategori, merchant/alias, dan definisi skema/pos menggunakan aturan yang sama dengan input aplikasi.
-- Skema mengalokasikan pemasukan yang belum digunakan, dibatasi saldo bebas dompet terverifikasi. Aturan tetap berlaku per siklus, persentase dihitung dari basis yang terlihat, dan satu pos dapat menerima sisa. Persetujuan menyimpan snapshot aturan. Alokasi ke target mencadangkan uang satu kali dan tidak membuat pergerakan saldo bank.
+- **Rupiah bulat eksak:** Semua nominal disimpan sebagai integer (`BigInteger`) dalam Rupiah bulat tanpa floating-point rounding.
+- **Zona waktu laporan:** Seluruh perhitungan batas hari, siklus bulanan, dan tampilan tanggal menggunakan `Asia/Jakarta` (WIB).
+- **Double-entry saldo & alokasi kategori terpisah:**
+  - Setiap transaksi membuat satu atau lebih baris perubahan saldo (`account_entries`) dan rincian pelaporan (`transaction_allocations` / `splits`).
+  - Transaksi `income` dan `expense` mendukung satu kategori atau *split* beberapa kategori (jumlah rincian wajib sama dengan nominal transaksi).
+  - **Transfer:** Transfer `Rp100.000` dengan biaya admin `Rp1.000` menghasilkan mutasi asal `-Rp101.000` dan tujuan `+Rp100.000`; pengeluaran laporan hanya mencatat biaya admin `Rp1.000`.
+  - **Refund:** Harus merujuk transaksi pengeluaran asal pada/sebelum tanggal refund, tidak boleh melebihi sisa pengeluaran kategori asal, dan menurunkan pengeluaran pada periode tanggal refund.
+- **Saldo pembuka (*opening balance anchor*):**
+  - Berlaku mulai awal `opening_date` per dompet.
+  - Transaksi sebelum `opening_date` tetap tercatat di riwayat & laporan historis (ditandai `partial_history: true`), tetapi saldo berjalan dompet hanya menjumlahkan mutasi pada dan setelah `opening_date`.
+- **Hapus dompet & kategori secara aman:**
+  - Menghapus dompet yang masih memiliki transaksi mewajibkan pilihan: pindahkan seluruh transaksi ke dompet lain (`transfer_to`) atau hapus berantai (`cascade=true`).
+  - Menghapus kategori mendukung pengalihan transaksi/subkategori ke kategori pengganti (`transfer_to`) atau menjadi *Belum dikategorikan*.
 
-## Antarmuka
+---
 
-Ringkasan menampilkan pengeluaran dan kategori terbesar dengan akses ke rincian. Transaksi memberi akses ke dompet, sumber dan kategori. Laporan menyediakan pratinjau serta unduhan PDF dan CSV untuk periode yang sama. Palet utama menggunakan gading dan hijau tua, dengan aksen kuningan. Contoh data untuk pengunjung ditandai sebagai demo; tindakan pencatatan memerlukan sesi pemilik.
+## 2. Siklus Waktu, Anggaran & Pengaturan
 
-API terautentikasi memiliki awalan `/v1`. Kontrak parameter dan respons tersedia melalui OpenAPI pada backend yang berjalan. Supabase mengelola identitas, FastAPI membatasi akses ke pemilik, PostgreSQL menyimpan buku kas, dan bucket privat menampung file sementara.
+- **Siklus bulanan fleksibel (`monthly_start_day` 1–31):**
+  - Default tanggal 1 (kalender normal).
+  - Mendukung siklus gajian (misalnya tanggal 25/26). Jika `monthly_start_day >= 15`, nama bulan siklus mengikuti bulan berakhirnya periode (contoh: `26 Sep – 25 Okt 2026` dilabeli Oktober 2026).
+- **Awal pekan (`weekly_start_day` 0–6):** Mengatur hari pertama pada tampilan kalender transaksi, rekap mingguan, dan grafik pola harian.
+- **Dompet utama (`default_account_id`):** Dipilih otomatis saat mencatat transaksi baru maupun memproses foto struk dari Telegram.
+- **Anggaran bulanan per kategori (`budgets`):**
+  - Ditetapkan pada kategori pengeluaran. Jika anggaran dipasang pada kategori induk, realisasi otomatis menjumlahkan pengeluaran kategori induk beserta seluruh subkategorinya.
+  - Status otomatis: `safe` (<80%), `warning` (80%–100%), `over` (>100%), lengkap dengan perhitungan batas belanja aman per hari (*safe daily allowance*).
 
-## Uji penerimaan dan pengembangan berikutnya
+---
 
-Periksa satu pembayaran BCA dari bukti sampai PDF, kirim ulang bukti yang sama, impor satu periode sebelum saldo acuan, alokasikan gaji yang sebagian sudah terpakai, serta uji satu struk dengan total dan kembalian. Uji perangkat nyata dan pemulihan database sebelum menjadikan buku kas ini catatan utama.
+## 3. Bukti Otomatis, Scan Struk AI, Impor Excel & Alokasi Pos
 
-Tagihan berulang, cicilan, paylater, proyeksi arus kas, aset, investasi, dan kekayaan bersih merupakan pengembangan berikutnya. Modul tersebut harus menggunakan buku kas dan kepemilikan data yang sudah ada. Pisahkan peristiwa terjadwal dari transaksi terkonfirmasi, dan pisahkan perubahan harga aset dari belanja bulanan.
+- **Konektor bukti (`bca`, `gopay`, `telegram`):**
+  - Gmail Apps Script (`connectors/gmail/`) meneruskan bukti email BCA ke `POST /v1/events/bca`.
+  - APK Android (`android/`) meneruskan notifikasi GoPay/Gojek ke `POST /v1/events/gopay`.
+  - Bot Telegram (`POST /v1/webhooks/telegram` atau long-polling) menerima catatan teks singkat (`kopi 35k tunai`) dan foto struk dengan tombol konfirmasi inline (`Simpan` / `Batalkan`).
+  - Data sensitif (nomor rekening/kartu, OTP, PIN, password) disamarkan otomatis sebelum disimpan (`redact`).
+  - Pencatatan otomatis memerlukan template parser terverifikasi (`verified: true`), referensi penyedia, dan tanggal valid; bukti ambigu masuk antrean **Perlu ditinjau** (`/v1/reviews`).
+- **Scan struk belanja berbasis Gemini Vision AI:**
+  - Endpoint `POST /v1/receipts/scan` (auto-fill form) dan `POST /v1/receipts/{job_id}/process` menggunakan **Gemini Vision API** (default model `gemini-3.5-flash-lite`, dapat diatur via `GEMINI_MODEL`).
+  - OCR lokal Tesseract **sengaja tidak dipasang** agar ukuran Docker image kecil dan VPS murah aman dari lonjakan RAM.
+- **Impor Excel (`.xlsx`):**
+  - Menyediakan template unduhan untuk `masters` dan `transactions`, pemetaan kolom fleksibel (dapat disimpan ulang), pratinjau tanpa mengubah buku kas (savepoint rollback), deteksi duplikat & transaksi mirip, serta publikasi atomik setelah persetujuan pemilik.
+- **Alokasi pos & target (`schemes`, `goals`, `reserves`):**
+  - Tersedia di API `/v1/schemes` & `/v1/goals` untuk mencadangkan pemasukan bebas ke pos tetap (`fixed`), persentase (`percent`), atau sisa (`remainder`) tanpa membuat mutasi saldo bank.
+
+---
+
+## 4. Antarmuka Pengguna (PWA) & Sinkronisasi Realtime
+
+- **Halaman utama PWA:**
+  1. **Ringkasan (`home`):** Total kekayaan likuid, kurva pengeluaran kumulatif, 4 kartu *Smart Financial Insights* (burn rate harian + proyeksi, perbandingan siklus lalu, kesehatan anggaran, pos terbesar), rincian kategori, progres anggaran, kartu dompet visual, notifikasi tinjauan, dan 5 transaksi terakhir.
+  2. **Transaksi (`transactions`):** 3 mode tampilan (**Harian**, **Kalender heatmap**, **Mingguan & Bulanan**), pencarian, filter cepat kategori/dompet/jenis, dan input langsung pada tanggal terpilih.
+  3. **Anggaran (`budgets`):** Total anggaran vs terpakai, *safe daily allowance*, daftar progres per kategori, dan daftar kategori belum beranggaran.
+  4. **Statistik (`stats`):** Grafik donat interaktif (pengeluaran & pemasukan), perbandingan siklus lalu, pola pengeluaran per hari dalam sepekan, grafik arus kas harian/mingguan, anggaran vs realisasi, dan distribusi saldo dompet.
+  5. **Laporan (`reports`):** Pratinjau laporan periode siklus atau rentang tanggal khusus, unduh **CSV** dan **PDF** (dirender di server lewat subprocess WeasyPrint terisolasi).
+  6. **Impor Excel (`import`):** Alur unggah → pemetaan kolom → pratinjau dampak → terapkan.
+  7. **Master data (`masters`):** Kelola dompet, kategori (induk/subkategori/arsip), dan status aktivitas konektor otomatis.
+  8. **Pengaturan (`settings`):** Tema Terang/Gelap (*Light/Dark Mode*), siklus bulanan, awal pekan, dompet utama, serta reset data Sandbox.
+  9. **Perlu ditinjau (`reviews`):** Tautkan ke transaksi yang ada, catat sebagai transaksi baru, atau abaikan bukti.
+- **Mode Sandbox Interaktif:** Saat belum login ke server, pengguna dapat menjelajahi seluruh fitur dengan data contoh di `localStorage` (kode `demo.ts` di-load dinamis hanya saat belum login).
+- **Sinkronisasi Realtime (`WS /v1/ws`):** Mutasi dari perangkat lain, Telegram, Gmail, atau Android langsung mengirim event `sync` ke browser aktif untuk melakukan *silent refresh* tanpa reload halaman.
+
+---
+
+## 5. Keamanan & Arsitektur VPS Murah
+
+- **Autentikasi:** Mendukung Supabase JWT (verifikasi JWKS asimetris `ES256`/`RS256` dikunci ke `OWNER_ID`) maupun token self-hosted (`SAMSAKU_DEV_TOKEN`) saat dijalankan mandiri di VPS tanpa Supabase.
+- **Isolasi Data:** Seluruh tabel PostgreSQL mengaktifkan Row Level Security (RLS) dan mencabut akses role publik (`PUBLIC`, `anon`, `authenticated`).
+- **Target Efisiensi VPS (512 MB – 2 GB RAM):**
+  - 3 container produksi (`db`, `api`, `caddy`) tanpa container Nginx terpisah.
+  - 1 request `GET /v1/bootstrap` saat membuka/refresh aplikasi (menggantikan 7 request sebelumnya).
+  - Query batch O(1) tanpa N+1, composite database indexes, dan subprocess terisolasi untuk render PDF WeasyPrint.
+
+---
+
+## 6. Rencana Pengembangan Berikutnya (Roadmap)
+
+Pengembangan lanjutan yang belum diimplementasikan (harus tetap memakai buku kas & kepemilikan data yang ada):
+- Tagihan berulang (*recurring bills*), cicilan, dan paylater (pisahkan peristiwa terjadwal dari transaksi terkonfirmasi).
+- Proyeksi arus kas jangka panjang.
+- Pencatatan aset, investasi, dan kekayaan bersih (*net worth*) dengan memisahkan perubahan nilai aset dari belanja bulanan.

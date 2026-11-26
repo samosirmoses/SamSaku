@@ -3,29 +3,19 @@ import json
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, select, func
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from app.db import Base
-from app.ledger import (
-    balance,
-    delete_account,
-    delete_budget,
-    delete_category,
-    delete_transaction,
-    edit_account,
-    get_settings,
-    list_budgets,
-    post_transaction,
-    summary,
-    update_settings,
-    update_transaction,
-    upsert_budget,
-)
-from app.intake import ingest
-from app.models import Account, Category, Transaction, Scheme, Reserve, Evidence
-from app.planning import plan_allocation
+from app.core.db import Base
+from app.models import Account, Category, Reserve, Scheme, Transaction
 from app.schemas import AccountEdit, ApplyIn, BudgetIn, EventIn, SettingsIn, TransactionIn
+from app.services.accounts import balance, delete_account, edit_account
+from app.services.categories import delete_category
+from app.services.intake import ingest
+from app.services.planning import plan_allocation
+from app.services.settings import get_settings, update_settings
+from app.services.summary import delete_budget, list_budgets, summary, upsert_budget
+from app.services.transactions import delete_transaction, post_transaction, update_transaction
 
 OWNER = "u1"
 DAY = date(2026, 1, 25)
@@ -49,86 +39,96 @@ def post(db, kind, amount, **fields):
 
 
 def test_transfer_fee_and_old_history(db):
-    post(db, "expense", 300000, date=date(2026,1,23))
+    post(db, "expense", 300000, date=date(2026, 1, 23))
     post(db, "transfer", 100000, to_account_id="GOPAY", fee=1000)
-    assert balance(db, db.get(Account,"BCA")) == -101000
-    assert balance(db, db.get(Account,"GOPAY")) == 100000
-    assert summary(db,OWNER,DAY,DAY)["expense"] == 1000
+    assert balance(db, db.get(Account, "BCA")) == -101000
+    assert balance(db, db.get(Account, "GOPAY")) == 100000
+    assert summary(db, OWNER, DAY, DAY)["expense"] == 1000
 
 
 def test_split_and_refund_do_not_double_count(db):
-    tx = post(db, "expense", 100000, splits=[{"category_id":"FOOD","amount":100000}], source_ref="expense01")
-    same = post(db, "expense", 100000, splits=[{"category_id":"FOOD","amount":100000}], source_ref="expense01")
+    tx = post(db, "expense", 100000, splits=[{"category_id": "FOOD", "amount": 100000}], source_ref="expense01")
+    same = post(db, "expense", 100000, splits=[{"category_id": "FOOD", "amount": 100000}], source_ref="expense01")
     assert same.id == tx.id
-    feb = date(2026,2,3)
+    feb = date(2026, 2, 3)
     post(db, "refund", 30000, original_id=tx.id, date=feb)
     feb_summary = summary(db, OWNER, feb, feb)
-    assert (feb_summary["expense"], feb_summary["income"]) == (-30000,0)
+    assert (feb_summary["expense"], feb_summary["income"]) == (-30000, 0)
     with pytest.raises(HTTPException):
-        post(db,"refund",80000,original_id=tx.id,date=feb)
-    assert balance(db,db.get(Account,"BCA")) == -70000
+        post(db, "refund", 80000, original_id=tx.id, date=feb)
+    assert balance(db, db.get(Account, "BCA")) == -70000
 
 
 def test_allocation_and_double_click(db, monkeypatch):
-    monkeypatch.setattr("app.planning.today", lambda: DAY)
+    monkeypatch.setattr("app.services.planning.today", lambda: DAY)
     income = post(db, "income", 10000000)
     post(db, "expense", 2000000)
-    rules = [{"name":n,"mode":m,"value":v} for n,m,v in [
-        ("Keluarga","fixed",1500000), ("Darurat","percent",20), ("Harian","percent",45), ("Bebas","remainder",0)]]
+    rules = [
+        {"name": n, "mode": m, "value": v}
+        for n, m, v in [
+            ("Keluarga", "fixed", 1500000),
+            ("Darurat", "percent", 20),
+            ("Harian", "percent", 45),
+            ("Bebas", "remainder", 0),
+        ]
+    ]
     rules[2]["category_ids"] = ["FOOD"]
-    scheme = Scheme(owner_id=OWNER,name="Gajian",code="PAY",cycle_day=25,rules=rules)
+    scheme = Scheme(owner_id=OWNER, name="Gajian", code="PAY", cycle_day=25, rules=rules)
     db.add(scheme)
     db.flush()
-    request = ApplyIn(date=DAY,request_id="abc",income_ids=[income.id])
-    quote = plan_allocation(db,OWNER,scheme.id,request)
-    request = request.model_copy(update={"revision":quote["revision"]})
-    assert [r["amount"] for r in quote["items"]] == [1500000,1600000,3600000,1300000]
-    assert plan_allocation(db,OWNER,scheme.id,request,True) == quote
-    assert plan_allocation(db,OWNER,scheme.id,request,True) == quote
+    request = ApplyIn(date=DAY, request_id="abc", income_ids=[income.id])
+    quote = plan_allocation(db, OWNER, scheme.id, request)
+    request = request.model_copy(update={"revision": quote["revision"]})
+    assert [r["amount"] for r in quote["items"]] == [1500000, 1600000, 3600000, 1300000]
+    assert plan_allocation(db, OWNER, scheme.id, request, True) == quote
+    assert plan_allocation(db, OWNER, scheme.id, request, True) == quote
     assert db.scalar(select(func.count()).select_from(Reserve)) == 4
     post(db, "expense", 50000, category_id="FOOD")
-    assert db.scalar(select(Reserve.remaining).where(Reserve.pot_name=="Harian")) == 3550000
+    assert db.scalar(select(Reserve.remaining).where(Reserve.pot_name == "Harian")) == 3550000
 
 
 def test_verified_template_and_duplicate_event(db, tmp_path, monkeypatch):
-    rule = {"source":"bca","account_code":"BCA","verified":True,"use_delivery_date":True,"kind":"expense",
-            "pattern":r"Pembayaran berhasil Rp(?P<amount>[\d.]+) di (?P<merchant>\w+) Ref (?P<ref>\w+)"}
+    rule = {
+        "source": "bca",
+        "account_code": "BCA",
+        "verified": True,
+        "use_delivery_date": True,
+        "kind": "expense",
+        "pattern": r"Pembayaran berhasil Rp(?P<amount>[\d.]+) di (?P<merchant>\w+) Ref (?P<ref>\w+)",
+    }
     path = tmp_path / "rules.json"
-    path.write_text(json.dumps([rule]),encoding="utf-8")
-    monkeypatch.setenv("SAMSAKU_PARSER_RULES",str(path))
-    data = EventIn(external_id="123",text="Pembayaran berhasil Rp35.000 di Kopi Ref ABC123")
+    path.write_text(json.dumps([rule]), encoding="utf-8")
+    monkeypatch.setenv("SAMSAKU_PARSER_RULES", str(path))
+    data = EventIn(external_id="123", text="Pembayaran berhasil Rp35.000 di Kopi Ref ABC123")
     event = ingest(db, OWNER, "bca", data)
     assert event.status == "posted"
-    assert ingest(db,OWNER,"bca",data).id == event.id
-    second = ingest(db,OWNER,"bca",data.model_copy(update={"external_id":"456"}))
+    assert ingest(db, OWNER, "bca", data).id == event.id
+    second = ingest(db, OWNER, "bca", data.model_copy(update={"external_id": "456"}))
     assert second.transaction_id == event.transaction_id
     assert db.scalar(select(func.count()).select_from(Transaction)) == 1
-    uncertain = ingest(db,OWNER,"gopay",EventIn(external_id="y",text="Silakan cek transaksi Anda"))
+    uncertain = ingest(db, OWNER, "gopay", EventIn(external_id="y", text="Silakan cek transaksi Anda"))
     assert uncertain.status == "review"
 
 
 def test_reference_cannot_be_reused_for_other_amount(db):
-    post(db,"expense",20000,source_ref="123")
+    post(db, "expense", 20000, source_ref="123")
     with pytest.raises(HTTPException) as err:
-        post(db,"expense",40000,source_ref="123")
+        post(db, "expense", 40000, source_ref="123")
     assert err.value.status_code == 409
 
 
 def test_crud_wallet_transaction_category_budget_and_settings(db):
-    # Settings
     assert get_settings(db, OWNER)["monthly_start_day"] == 1
     saved_settings = update_settings(
         db, OWNER, SettingsIn(monthly_start_day=25, weekly_start_day=0, default_account_id="BCA")
     )
     assert saved_settings == {"monthly_start_day": 25, "weekly_start_day": 0, "default_account_id": "BCA"}
 
-    # Budget upsert & status
     upsert_budget(db, OWNER, BudgetIn(category_id="FOOD", amount=100000))
     tx = post(db, "expense", 85000, category_id="FOOD", description="Makan siang")
     budgets = list_budgets(db, OWNER, DAY, DAY)
     assert len(budgets) == 1 and budgets[0]["spent"] == 85000 and budgets[0]["status"] == "warning"
 
-    # Edit transaction
     update_transaction(
         db,
         OWNER,
@@ -139,7 +139,6 @@ def test_crud_wallet_transaction_category_budget_and_settings(db):
     budgets = list_budgets(db, OWNER, DAY, DAY)
     assert budgets[0]["spent"] == 120000 and budgets[0]["status"] == "over"
 
-    # Edit account
     edit_account(
         db,
         OWNER,
@@ -149,19 +148,15 @@ def test_crud_wallet_transaction_category_budget_and_settings(db):
     assert db.get(Account, "BCA").name == "BCA Utama"
     assert balance(db, db.get(Account, "BCA")) == 380000
 
-    # Delete account with transfer_to moves transactions to GOPAY
     delete_account(db, OWNER, "BCA", transfer_to="GOPAY")
     assert db.get(Account, "BCA") is None
     assert balance(db, db.get(Account, "GOPAY")) == -120000
     assert get_settings(db, OWNER)["default_account_id"] == "GOPAY"
 
-    # Delete transaction restores balance
     delete_transaction(db, OWNER, tx.id)
     assert balance(db, db.get(Account, "GOPAY")) == 0
 
-    # Delete budget & category
     delete_budget(db, OWNER, budgets[0]["id"])
     assert list_budgets(db, OWNER, DAY, DAY) == []
     delete_category(db, OWNER, "FOOD")
     assert db.get(Category, "FOOD") is None
-

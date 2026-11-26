@@ -1,16 +1,18 @@
-"""Tests for native WebSocket realtime sync and Gemini Vision / Tesseract receipt OCR."""
+"""Tests for native WebSocket realtime sync and Gemini Vision-only receipt scanning."""
 from io import BytesIO
 from unittest.mock import patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app import ocr
-from app.db import Base, get_db
+from app.core.db import Base, get_db
 from app.main import app
+from app.services import ocr
 
 
 def _tiny_png_bytes() -> bytes:
@@ -39,7 +41,6 @@ def test_websocket_auth_and_broadcast(monkeypatch):
                 ws.send_json({"type": "ping"})
                 assert ws.receive_json() == {"type": "pong"}
 
-                # Triggering an API mutation must push a realtime sync event to the connected socket
                 res = client.post(
                     "/v1/accounts",
                     headers={"X-Dev-Token": "ws-secret-123"},
@@ -91,19 +92,10 @@ def test_gemini_vision_receipt_parsing_and_formatting(monkeypatch):
             }
 
     class _FakeClient:
-        def __init__(self, *a, **kw):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
         def post(self, *a, **kw):
             return _FakeResp()
 
-    with patch.object(ocr.httpx, "Client", _FakeClient):
+    with patch.object(ocr, "get_http_client", return_value=_FakeClient()):
         parsed = ocr._scan_with_gemini(_tiny_png_bytes(), ["Makan & Minum", "Belanja & Kebutuhan"])
         assert parsed is not None
         assert parsed["merchant"] == "Indomaret"
@@ -113,6 +105,18 @@ def test_gemini_vision_receipt_parsing_and_formatting(monkeypatch):
         assert parsed["category_hint"] == "Belanja & Kebutuhan"
         assert parsed["engine"] == "gemini"
         assert ocr._format_description(parsed["merchant"], parsed["items"]) == "Indomaret — Susu Ultra, Roti Tawar"
+
+
+def test_receipt_scan_requires_gemini_key(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("SAMSAKU_ENV", "development")
+    with Session(engine) as db:
+        with pytest.raises(HTTPException) as err:
+            ocr.scan_receipt_auto(db, "owner-1", "struk.png", _tiny_png_bytes())
+        assert err.value.status_code == 503
+        assert "GEMINI_API_KEY" in err.value.detail
 
 
 def test_parse_positive_int_mybca_and_indonesian_formats():

@@ -1,5 +1,10 @@
 name: Verify SamSaku
-on: workflow_dispatch
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -27,7 +32,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client-16 gnupg tesseract-ocr tesseract-ocr-ind libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-dejavu-core
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client-16 gnupg libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 fonts-dejavu-core
       - run: pip install -r requirements-dev.txt && alembic upgrade head && python -m pytest -q
         working-directory: backend
       - run: node --test connectors/gmail/tests/sync.test.cjs

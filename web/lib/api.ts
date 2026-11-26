@@ -1,19 +1,18 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { handleDemoRequest } from "./demo";
 
 export const endpoint = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/v1").replace(/\/$/, "");
 let sb: SupabaseClient | null = null;
 
-export function supabase() {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL,
-        key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+export function supabase(): SupabaseClient | null {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     if (url && key && !sb) sb = createClient(url, key, { auth: { flowType: "pkce" } });
     return sb;
 }
 
 export const isLoopback = (s: string) => ["127.0.0.1", "localhost", "[::1]"].includes(s);
 
-export function allowDev() {
+export function allowDev(): boolean {
     return typeof window !== "undefined";
 }
 
@@ -22,7 +21,7 @@ export function getSavedToken(): string {
     return sessionStorage.getItem("samsaku-dev") || localStorage.getItem("samsaku-dev") || "";
 }
 
-export function setSavedToken(token: string) {
+export function setSavedToken(token: string): void {
     if (typeof window === "undefined") return;
     if (token) {
         sessionStorage.setItem("samsaku-dev", token);
@@ -68,8 +67,9 @@ export async function request(path: string, init: RequestInit = {}, asBlob = fal
         }
     }
 
-    // In interactive Demo Mode (when not authenticated to server), handle mutations & queries locally
+    // Lazy-load demo store ONLY when unauthenticated so logged-in users never download demo.ts (24KB)
     if (!hasAuth && !asBlob) {
+        const { handleDemoRequest } = await import("./demo");
         return handleDemoRequest(path, init);
     }
 
@@ -103,12 +103,12 @@ export const patch = <T,>(path: string, body: unknown) =>
     request(path, { method: "PATCH", body: JSON.stringify(body) }) as Promise<T>;
 export const del = <T,>(path: string) => request(path, { method: "DELETE" }) as Promise<T>;
 
-export async function download(path: string, filename: string) {
+export async function download(path: string, filename: string): Promise<void> {
     const blob = (await request(path, {}, true)) as Blob;
     saveBlob(blob, filename);
 }
 
-export function saveBlob(blob: Blob, name: string) {
+export function saveBlob(blob: Blob, name: string): void {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

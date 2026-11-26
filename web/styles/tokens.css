@@ -1,0 +1,66 @@
+:root {
+  --ivory: #f4f6f9;
+  --paper: #ffffff;
+  --paper-subtle: #f8fafc;
+  --sidebar-bg: #ffffff;
+  --topbar-bg: rgba(255, 255, 255, 0.88);
+  --ink: #0f172a;
+  --pine: #0f172a;
+  --pine-hover: #1e293b;
+  --pine-soft: #f1f5f9;
+  --btn-fg: #ffffff;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --track-bg: #e2e8f0;
+  --brass: #334155;
+  --body: "DM Sans", system-ui, -apple-system, sans-serif;
+  --serif: "DM Sans", system-ui, -apple-system, sans-serif;
+  --card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.02);
+  --card-hover-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+
+  /* Pure Semantic Financial Accents (10% Rule) */
+  --income-fg: #15803d;
+  --income-bg: #f0fdf4;
+  --income-border: #bbf7d0;
+  --expense-fg: #dc2626;
+  --expense-bg: #fef2f2;
+  --expense-border: #fecaca;
+  --transfer-fg: #1d4ed8;
+  --transfer-bg: #eff6ff;
+  --transfer-border: #bfdbfe;
+  --warn-fg: #b45309;
+  --warn-bg: #fffbeb;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --ivory: #090d16;
+  --paper: #111827;
+  --paper-subtle: #182234;
+  --sidebar-bg: #0c121e;
+  --topbar-bg: rgba(12, 18, 30, 0.88);
+  --ink: #f8fafc;
+  --pine: #f1f5f9;
+  --pine-hover: #ffffff;
+  --pine-soft: rgba(148, 163, 184, 0.14);
+  --btn-fg: #0f172a;
+  --muted: #94a3b8;
+  --line: #1e293b;
+  --track-bg: #1e293b;
+  --brass: #94a3b8;
+  --card-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --card-hover-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  --income-fg: #4ade80;
+  --income-bg: rgba(74, 222, 128, 0.12);
+  --income-border: rgba(74, 222, 128, 0.28);
+  --expense-fg: #f87171;
+  --expense-bg: rgba(248, 113, 113, 0.12);
+  --expense-border: rgba(248, 113, 113, 0.28);
+  --transfer-fg: #60a5fa;
+  --transfer-bg: rgba(96, 165, 250, 0.12);
+  --transfer-border: rgba(96, 165, 250, 0.28);
+  --warn-fg: #fbbf24;
+  --warn-bg: rgba(251, 191, 36, 0.12);
+}
+
