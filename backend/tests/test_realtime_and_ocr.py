@@ -322,6 +322,29 @@ def test_receipt_matching_bca_masked_va_transfer_income_expense():
     assert res_amb["account_id"] == "a-bca1"
     assert res_amb["account_guessed"] is True
 
+    # 6. Real myBCA QRIS middle-masked source format: "883 - 2** - **41"
+    xpresi = SimpleNamespace(id="a-xpresi", code="BCA-XPRESI", name="Tahapan Xpresi", kind="bank", account_number="8832123441")
+    res_qris = resolve_receipt_classification(
+        {
+            "transaction_type": "Pembayaran QRIS",
+            "direction": "expense",
+            "merchant": "RMU RESTO ON TRAIN N 1",
+            "amount": 59000,
+            "fee": 0,
+            "total_amount": 59000,
+            "source_bank": "BCA",
+            "source_account_no": "883 - 2** - **41",
+            "target_bank": None,
+            "target_account_no": None,
+        },
+        [bca1, xpresi, gopay],
+        default_account_id="a-bca1",
+    )
+    assert res_qris["kind"] == "expense"
+    assert res_qris["account_id"] == "a-xpresi"
+    assert res_qris["account_guessed"] is False
+    assert res_qris["description"] == "RMU RESTO ON TRAIN N 1 (Pembayaran QRIS)"
+
 
 def test_telegram_photo_bca_transfer_end_to_end(monkeypatch):
     from uuid import uuid4

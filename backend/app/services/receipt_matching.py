@@ -98,6 +98,24 @@ def _account_providers(acc) -> set[str]:
     return _detect_providers(f"{acc.name} {acc.code}")
 
 
+def _masked_pattern_matches(raw_no: str, reg_digits: str) -> bool:
+    """Match middle/edge-masked account numbers like myBCA '883 - 2** - **41' against full registered digits."""
+    compact = re.sub(r"[\s.\-]+", "", str(raw_no).strip())
+    if not re.search(r"[*xX]", compact):
+        return False
+    visible_digits = re.sub(r"\D", "", compact)
+    if len(visible_digits) < 4:
+        return False
+    # Exact-length wildcard match (e.g., '8832****41' -> '^8832\\d\\d\\d\\d41$')
+    exact_rx = "^" + "".join(r"\d" if ch in "*xX" else re.escape(ch) for ch in compact if ch.isdigit() or ch in "*xX") + "$"
+    if re.fullmatch(exact_rx, reg_digits):
+        return True
+    # Flexible-length wildcard match for variable star counts (e.g., '***7890' or '883***41')
+    flex_parts = re.split(r"[*xX]+", re.sub(r"[^\d*xX]", "", compact))
+    flex_rx = "^" + r"\d+".join(re.escape(p) for p in flex_parts) + "$"
+    return bool(re.fullmatch(flex_rx, reg_digits))
+
+
 def match_account_by_number(
     accounts: Iterable,
     raw_no: str | None,
@@ -105,17 +123,18 @@ def match_account_by_number(
     merchant_hint: str | None = None,
     exclude_id: str | None = None,
 ):
-    """Match an extracted account/VA number to a registered wallet using suffix + provider scoring."""
+    """Match an extracted account/VA number to a registered wallet using exact, masked-wildcard, VA, and suffix scoring."""
     if not raw_no:
         return None
     full_digits = digits_only(raw_no)
     tail = trailing_visible_digits(raw_no)
+    has_mask = bool(re.search(r"[*xX]", str(raw_no)))
     if len(tail) < 4 and len(full_digits) < 4:
         return None
 
-    va_stripped, va_providers = _strip_va_prefix(full_digits)
+    va_stripped, va_providers = _strip_va_prefix(full_digits) if not has_mask else (None, set())
     hint_providers = _detect_providers(f"{bank_hint or ''} {merchant_hint or ''}") | va_providers
-    ext_variants = _phone_variants(full_digits) if full_digits else set()
+    ext_variants = _phone_variants(full_digits) if (full_digits and not has_mask) else set()
     if va_stripped:
         ext_variants |= _phone_variants(va_stripped)
 
@@ -131,6 +150,8 @@ def match_account_by_number(
         base_score = 0
         if ext_variants & reg_variants:
             base_score = 100
+        elif has_mask and _masked_pattern_matches(raw_no, reg):
+            base_score = 98
         elif va_stripped and any(v.endswith(r) or r.endswith(v) for v in _phone_variants(va_stripped) for r in reg_variants if min(len(v), len(r)) >= 8):
             base_score = 95
         elif len(tail) >= 4:

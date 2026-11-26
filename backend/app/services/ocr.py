@@ -135,8 +135,8 @@ def _scan_with_gemini(
             "9. date: tanggal transaksi dalam format YYYY-MM-DD (atau null jika tidak terbaca).\n"
             f"10. category: PRIORITASKAN isi BERITA (note) & catatan pengguna, lalu nama penerima/merchant, lalu transaction_type. "
             f"Pilih SATU nama kategori PERSIS dari daftar pengeluaran [{cats_text}] (atau daftar pemasukan [{inc_cats_text}] jika uang masuk).\n"
-            "11. source_bank & source_account_no: nama bank/e-wallet sumber & nomor rekening sumber persis seperti yang tampil (boleh mengandung '*' atau 'X' jika disamarkan, misal '***7890').\n"
-            "12. target_bank & target_account_no: nama bank/e-wallet/VA tujuan & nomor rekening/VA tujuan persis seperti yang tampil.\n"
+            "11. source_bank & source_account_no: nama bank/e-wallet sumber & nomor rekening pada kolom 'Sumber Dana' / 'Dari Rekening' persis seperti tampil (termasuk tanda '*'/'X' jika disamarkan di tengah, misal '883 - 2** - **41' atau '***7890'). JANGAN ambil Customer PAN, RRN, Terminal ID, atau No. Referensi!\n"
+            "12. target_bank & target_account_no: nama bank/e-wallet/VA tujuan & nomor rekening/VA tujuan pada bukti transfer. PENTING: pada 'Pembayaran QRIS', isi target_bank=null dan target_account_no=null (JANGAN ambil 'Pengakuisisi' seperti BRI/OVO atau 'Merchant PAN'!).\n"
             f"13. account: jika sumber pembayaran cocok dengan salah satu dompet di [{accs_text}], pilih nama dompet itu PERSIS; jika tidak yakin, isi null."
             f"{context_line}"
         )
