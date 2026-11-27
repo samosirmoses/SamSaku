@@ -108,6 +108,15 @@ class SettingsIn(BaseModel):
     default_account_id: str | None = None
 
 
+class DataResetIn(BaseModel):
+    mode: Literal["partial", "wipe"]
+    confirm: str = Field(min_length=1, max_length=64)
+    reset_transactions: bool = False
+    clear_evidence: bool = False
+    zero_opening_balances: bool = False
+    clear_budgets: bool = False
+
+
 class RuleIn(BaseModel):
     name: Name
     mode: Literal["fixed", "percent", "remainder"]

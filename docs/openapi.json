@@ -432,6 +432,50 @@
         "title": "ConfirmReceipt",
         "type": "object"
       },
+      "DataResetIn": {
+        "properties": {
+          "clear_budgets": {
+            "default": false,
+            "title": "Clear Budgets",
+            "type": "boolean"
+          },
+          "clear_evidence": {
+            "default": false,
+            "title": "Clear Evidence",
+            "type": "boolean"
+          },
+          "confirm": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "partial",
+              "wipe"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reset_transactions": {
+            "default": false,
+            "title": "Reset Transactions",
+            "type": "boolean"
+          },
+          "zero_opening_balances": {
+            "default": false,
+            "title": "Zero Opening Balances",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "mode",
+          "confirm"
+        ],
+        "title": "DataResetIn",
+        "type": "object"
+      },
       "EventIn": {
         "properties": {
           "external_id": {
@@ -1855,6 +1899,67 @@
         "summary": "Connections",
         "tags": [
           "reviews-events"
+        ]
+      }
+    },
+    "/v1/data/reset": {
+      "post": {
+        "operationId": "reset_data_v1_data_reset_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-dev-token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Dev-Token",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DataResetIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reset Data",
+        "tags": [
+          "budgets-settings"
         ]
       }
     },

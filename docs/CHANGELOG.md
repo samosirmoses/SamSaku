@@ -4,6 +4,17 @@ Seluruh perubahan penting pada arsitektur, fitur, skema database, dan performa d
 
 ---
 
+## [2.2.0] — 2026-11-27 — Fitur Reset Data Fleksibel & Wipe Semua Data
+
+### Fitur & Keamanan Data
+- **Endpoint `POST /v1/data/reset` (`routers/budgets.py`, `services/settings.py`):** Menambahkan dukungan reset data atomik dengan `lock_owner` dan validasi frasa konfirmasi di backend:
+  - **Mode `partial` (konfirmasi `"RESET"`):** Opsi fleksibel untuk menghapus transaksi & mutasi saldo (termasuk cadangan), membersihkan antrean bukti/review & riwayat impor, menol-kan saldo awal dompet (`opening_balance → 0`), dan/atau menghapus anggaran bulanan.
+  - **Mode `wipe` (konfirmasi `"WIPE SEMUA"`):** Menghapus seluruh data milik pemilik (dompet, kategori, transaksi, bukti, anggaran, merchant, skema, goal, pengaturan) hingga kondisi kosong total.
+  - Mengirim event realtime `data:reset` via `WS /v1/ws` agar seluruh perangkat aktif langsung ter-refresh.
+- **Zona Bahaya di Pengaturan (`web/features/settings/DangerZone.tsx`):** Menambahkan panel Zona Bahaya pada halaman Pengaturan (mode live) lengkap dengan checkbox pilihan fleksibel dan modal konfirmasi ketik frasa sebelum eksekusi.
+
+---
+
 ## [2.1.0] — 2026-11-27 — Enhanced Scan Bukti BCA, Deteksi Sumber Dana & Transfer Antar Dompet Otomatis
 
 ### Fitur & Kecerdasan Bukti Transaksi

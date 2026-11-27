@@ -2,6 +2,7 @@
 import { useState, type FormEvent } from "react";
 import { Calendar, CheckCircle2, Moon, RotateCcw, Settings as SettingsIcon, Sun, Wallet } from "lucide-react";
 import { ErrorNote, Field } from "../../components/ui";
+import { DangerZone } from "./DangerZone";
 import type { ThemeMode } from "../../hooks/useTheme";
 import { put } from "../../lib/api";
 import {
@@ -194,7 +195,7 @@ export function SettingsView({
                     </div>
                 </section>
 
-                {demoMode && (
+                {demoMode ? (
                     <section className="card">
                         <div className="section-title">
                             <h2>Data contoh interaktif</h2>
@@ -208,6 +209,8 @@ export function SettingsView({
                             <RotateCcw size={15} /> Reset data contoh ke awal
                         </button>
                     </section>
+                ) : (
+                    <DangerZone data={data} onDone={onDone} />
                 )}
 
                 {data.connections && (

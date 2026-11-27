@@ -71,7 +71,7 @@ SamSaku adalah aplikasi pencatatan keuangan pribadi satu pemilik (*single-owner*
   5. **Laporan (`reports`):** Pratinjau laporan periode siklus atau rentang tanggal khusus, unduh **CSV** dan **PDF** (dirender di server lewat subprocess WeasyPrint terisolasi).
   6. **Impor Excel (`import`):** Alur unggah → pemetaan kolom → pratinjau dampak → terapkan.
   7. **Master data (`masters`):** Kelola dompet, kategori (induk/subkategori/arsip), dan status aktivitas konektor otomatis.
-  8. **Pengaturan (`settings`):** Tema Terang/Gelap (*Light/Dark Mode*), siklus bulanan, awal pekan, dompet utama, serta reset data Sandbox.
+  8. **Pengaturan (`settings`):** Tema Terang/Gelap (*Light/Dark Mode*), siklus bulanan, awal pekan, dompet utama, reset data Sandbox, serta **Zona Bahaya** untuk **Reset Data fleksibel** (pilih transaksi/mutasi, antrean bukti & riwayat impor, nol-kan saldo awal dompet, dan/atau anggaran bulanan dengan konfirmasi ketik `RESET`) maupun **Wipe Semua Data** (kosong total dengan konfirmasi ketik `WIPE SEMUA`) via `POST /v1/data/reset`.
   9. **Perlu ditinjau (`reviews`):** Tautkan ke transaksi yang ada, catat sebagai transaksi baru, atau abaikan bukti.
 - **Mode Sandbox Interaktif:** Saat belum login ke server, pengguna dapat menjelajahi seluruh fitur dengan data contoh di `localStorage` (kode `demo.ts` di-load dinamis hanya saat belum login).
 - **Sinkronisasi Realtime (`WS /v1/ws`):** Mutasi dari perangkat lain, Telegram, Gmail, atau Android langsung mengirim event `sync` ke browser aktif untuk melakukan *silent refresh* tanpa reload halaman.

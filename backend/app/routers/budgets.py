@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 from ..core.auth import owner
 from ..core.db import get_db
 from ..core.realtime import notify as realtime_notify
-from ..schemas import BudgetIn, SettingsIn
-from ..services.settings import get_settings, resolve_period, update_settings
+from ..schemas import BudgetIn, DataResetIn, SettingsIn
+from ..services.settings import get_settings, reset_owner_data, resolve_period, update_settings
 from ..services.summary import delete_budget, list_budgets, upsert_budget
 
 router = APIRouter(prefix="/v1", tags=["budgets-settings"])
@@ -24,6 +24,14 @@ def save_settings(data: SettingsIn, db: Session = Depends(get_db), user: str = D
     result = update_settings(db, user, data)
     db.commit()
     realtime_notify(user, "settings:updated")
+    return result
+
+
+@router.post("/data/reset")
+def reset_data(data: DataResetIn, db: Session = Depends(get_db), user: str = Depends(owner)):
+    result = reset_owner_data(db, user, data)
+    db.commit()
+    realtime_notify(user, "data:reset")
     return result
 
 

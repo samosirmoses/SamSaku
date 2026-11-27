@@ -44,6 +44,7 @@ Semua endpoint aplikasi memakai awalan `/v1` (kecuali `/health`), mengembalikan 
 | `GET` / `POST` | `/v1/budgets` | Daftar progres anggaran periode / buat atau ubah anggaran kategori |
 | `DELETE` | `/v1/budgets/{key}` | Hapus anggaran |
 | `GET` / `PUT` | `/v1/settings` | Baca atau simpan `monthly_start_day`, `weekly_start_day`, `default_account_id` |
+| `POST` | `/v1/data/reset` | Reset data secara fleksibel (`mode="partial"`, konfirmasi `"RESET"`) atau hapus seluruh data pemilik hingga kosong total (`mode="wipe"`, konfirmasi `"WIPE SEMUA"`) |
 
 ### Bukti Otomatis, Tinjauan & Telegram
 | Method | Path | Deskripsi |

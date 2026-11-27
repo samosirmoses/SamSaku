@@ -2,13 +2,32 @@
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
+from fastapi import HTTPException
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ..core.config import JAKARTA
 from ..core.db import lock_owner
-from ..models import Account, UserSettings
-from ..schemas import SettingsIn
+from ..models import (
+    Account,
+    Alias,
+    Allocation,
+    Budget,
+    Category,
+    Entry,
+    Evidence,
+    FileJob,
+    Goal,
+    ImportEntry,
+    Merchant,
+    Reserve,
+    ReserveMovement,
+    Scheme,
+    Split,
+    Transaction,
+    UserSettings,
+)
+from ..schemas import DataResetIn, SettingsIn
 from .calculations import cycle
 from .common import owned
 
@@ -103,3 +122,102 @@ def period_for_month(month: str, start_day: int = 1) -> tuple[date, date]:
     next_y, next_m = (y + 1, 1) if m == 12 else (y, m + 1)
     end_d = date(next_y, next_m, min(clamped, monthrange(next_y, next_m)[1])) - timedelta(days=1)
     return start_d, end_d
+
+
+def reset_owner_data(db: Session, owner_id: str, data: DataResetIn) -> dict:
+    expected = "WIPE SEMUA" if data.mode == "wipe" else "RESET"
+    if data.confirm.strip().upper() != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Konfirmasi tidak cocok. Ketik "{expected}" untuk melanjutkan.',
+        )
+
+    if data.mode == "partial" and not any(
+        [
+            data.reset_transactions,
+            data.clear_evidence,
+            data.zero_opening_balances,
+            data.clear_budgets,
+        ]
+    ):
+        raise HTTPException(status_code=400, detail="Pilih minimal satu jenis data untuk direset.")
+
+    lock_owner(db, owner_id)
+
+    deleted = {
+        "transactions": 0,
+        "evidence": 0,
+        "file_jobs": 0,
+        "budgets": 0,
+        "accounts": 0,
+        "categories": 0,
+        "merchants": 0,
+        "schemes": 0,
+        "goals": 0,
+    }
+    zeroed_accounts = 0
+
+    def _del(model) -> int:
+        res = db.execute(delete(model).where(model.owner_id == owner_id))
+        return int(res.rowcount or 0)
+
+    if data.mode == "wipe":
+        job_ids = list(db.scalars(select(FileJob.id).where(FileJob.owner_id == owner_id)))
+        if job_ids:
+            db.execute(delete(ImportEntry).where(ImportEntry.job_id.in_(job_ids)))
+        deleted["file_jobs"] = _del(FileJob)
+        deleted["evidence"] = _del(Evidence)
+        _del(ReserveMovement)
+        _del(Reserve)
+        _del(Allocation)
+        _del(Entry)
+        _del(Split)
+        db.execute(update(Transaction).where(Transaction.owner_id == owner_id).values(original_id=None))
+        deleted["transactions"] = _del(Transaction)
+        deleted["budgets"] = _del(Budget)
+        _del(UserSettings)
+        _del(Alias)
+        deleted["merchants"] = _del(Merchant)
+        deleted["schemes"] = _del(Scheme)
+        deleted["goals"] = _del(Goal)
+        db.execute(update(Category).where(Category.owner_id == owner_id).values(parent_id=None))
+        deleted["categories"] = _del(Category)
+        deleted["accounts"] = _del(Account)
+        db.flush()
+        return {"mode": "wipe", "deleted": deleted, "zeroed_accounts": zeroed_accounts}
+
+    if data.clear_evidence:
+        job_ids = list(db.scalars(select(FileJob.id).where(FileJob.owner_id == owner_id)))
+        if job_ids:
+            db.execute(delete(ImportEntry).where(ImportEntry.job_id.in_(job_ids)))
+        deleted["file_jobs"] = _del(FileJob)
+        deleted["evidence"] = _del(Evidence)
+
+    if data.reset_transactions:
+        if not data.clear_evidence:
+            db.execute(
+                update(Evidence)
+                .where(Evidence.owner_id == owner_id, Evidence.transaction_id.is_not(None))
+                .values(transaction_id=None)
+            )
+        _del(ReserveMovement)
+        _del(Reserve)
+        _del(Allocation)
+        _del(Entry)
+        _del(Split)
+        db.execute(update(Transaction).where(Transaction.owner_id == owner_id).values(original_id=None))
+        deleted["transactions"] = _del(Transaction)
+
+    if data.zero_opening_balances:
+        res = db.execute(
+            update(Account)
+            .where(Account.owner_id == owner_id, Account.opening_balance.is_not(None))
+            .values(opening_balance=0)
+        )
+        zeroed_accounts = int(res.rowcount or 0)
+
+    if data.clear_budgets:
+        deleted["budgets"] = _del(Budget)
+
+    db.flush()
+    return {"mode": "partial", "deleted": deleted, "zeroed_accounts": zeroed_accounts}
