@@ -6,6 +6,7 @@ import {
     Settings,
     Summary,
     Transaction,
+    cycleMonthForDate,
     expense,
     inferCategoryClient,
     period,
@@ -369,7 +370,7 @@ export function handleDemoRequest(path: string, init: RequestInit = {}): unknown
     if (pathname === "/bootstrap" && method === "GET") {
         const startDay = store.settings.monthly_start_day || 1;
         const reqMonth = url.searchParams.get("month");
-        const activeMonth = reqMonth || today().slice(0, 7);
+        const activeMonth = reqMonth || cycleMonthForDate(today(), startDay);
         const range = period(activeMonth, startDay);
         const start = url.searchParams.get("start") || range.start;
         const end = url.searchParams.get("end") || range.end;
@@ -639,6 +640,25 @@ export function handleDemoRequest(path: string, init: RequestInit = {}): unknown
     }
 
     if (pathname === "/reviews") return [];
+    if (pathname.startsWith("/reviews/") && pathname.endsWith("/resolve") && method === "POST") {
+        if (body.action === "post" && body.transaction) {
+            const tx: Transaction = {
+                id: "tx-" + Date.now(),
+                date: body.transaction.date || today(),
+                kind: body.transaction.kind || "expense",
+                account_id: body.transaction.account_id,
+                to_account_id: body.transaction.to_account_id || null,
+                amount: Number(body.transaction.amount),
+                fee: Number(body.transaction.fee || 0),
+                description: body.transaction.description || "",
+                category_id: body.transaction.category_id || null,
+                source: "review",
+            };
+            store.transactions.unshift(tx);
+            saveStore(store);
+        }
+        return { status: body.action === "post" ? "posted" : "ignored" };
+    }
     if (pathname === "/connections")
         return [
             { source: "bca", last_received_at: null },

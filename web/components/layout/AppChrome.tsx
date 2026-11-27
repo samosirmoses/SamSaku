@@ -1,33 +1,36 @@
 "use client";
 import {
     ArrowLeftRight,
-    BarChart3,
     CalendarDays,
     Camera,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
+    Inbox,
     LogIn,
     LogOut,
     Menu,
     Moon,
     Plus,
+    RefreshCw,
     Settings as SettingsIcon,
     Sun,
     X,
 } from "lucide-react";
 import type { ThemeMode } from "../../hooks/useTheme";
-import { type Transaction, monthLabel, periodRangeLabel, shiftMonth } from "../../lib/domain";
+import { type Transaction, cycleMonthForDate, monthLabel, periodRangeLabel, shiftMonth, today } from "../../lib/domain";
 import { NAV_LINKS, PAGE_LABELS, type Page } from "./navigation";
 
 export function SidebarNav({
     page,
     authed,
+    reviewCount = 0,
     onNav,
     onAuthAction,
 }: {
     page: Page;
     authed: boolean;
+    reviewCount?: number;
     onNav: (p: Page) => void;
     onAuthAction: () => void;
 }) {
@@ -41,12 +44,13 @@ export function SidebarNav({
                 {NAV_LINKS.map(({ page: p, icon: Icon }, i) => (
                     <button
                         key={p}
-                        className={(page === p ? "active " : "") + (i === 4 ? "section-break" : "")}
+                        className={(page === p ? "active " : "") + (i === 5 ? "section-break" : "")}
                         aria-current={page === p ? "page" : undefined}
                         onClick={() => onNav(p)}
                     >
                         <Icon size={18} strokeWidth={1.8} />
-                        {PAGE_LABELS[p]}
+                        <span className="side-link-label">{PAGE_LABELS[p]}</span>
+                        {p === "reviews" && reviewCount > 0 && <span className="nav-badge">{reviewCount}</span>}
                     </button>
                 ))}
             </nav>
@@ -66,9 +70,12 @@ export function Topbar({
     ready,
     demoMode,
     live,
+    refreshing = false,
+    reviewCount = 0,
     onOpenMenu,
     onToggleTheme,
     onOpenSettings,
+    onOpenReviews,
     onOpenLogin,
 }: {
     page: Page;
@@ -76,9 +83,12 @@ export function Topbar({
     ready: boolean;
     demoMode: boolean;
     live: boolean;
+    refreshing?: boolean;
+    reviewCount?: number;
     onOpenMenu: () => void;
     onToggleTheme: (next: ThemeMode) => void;
     onOpenSettings: () => void;
+    onOpenReviews?: () => void;
     onOpenLogin: () => void;
 }) {
     return (
@@ -87,11 +97,27 @@ export function Topbar({
                 <button className="icon-btn mobile-menu" aria-label="Buka navigasi" onClick={onOpenMenu}>
                     <Menu size={21} />
                 </button>
-                <span className="desktop-crumb">SamSaku Wealth</span>
+                <span className="desktop-crumb">SamSaku</span>
                 <ChevronRight className="desktop-crumb" size={13} />
                 <strong>{PAGE_LABELS[page]}</strong>
+                {refreshing && (
+                    <span className="syncing-pill" aria-live="polite">
+                        <RefreshCw size={12} className="spin-icon" /> Sinkron…
+                    </span>
+                )}
             </div>
             <div className="top-actions">
+                {reviewCount > 0 && onOpenReviews && page !== "reviews" && (
+                    <button
+                        type="button"
+                        className="review-top-pill"
+                        title="Ada bukti/draf baru menunggu keputusan"
+                        onClick={onOpenReviews}
+                    >
+                        <Inbox size={14} />
+                        <span>{reviewCount} Draf</span>
+                    </button>
+                )}
                 <button
                     type="button"
                     className="icon-btn"
@@ -115,11 +141,62 @@ export function Topbar({
                         {demoMode ? "Sandbox" : live ? "Live" : "Terhubung"}
                     </button>
                 )}
-                <span className="avatar" aria-hidden="true">
-                    S
-                </span>
             </div>
         </header>
+    );
+}
+
+export function CyclePickerControl({
+    month,
+    startDay,
+    onPickMonth,
+}: {
+    month: string;
+    startDay: number;
+    onPickMonth: (m: string) => void;
+}) {
+    const currentCycleMonth = cycleMonthForDate(today(), startDay);
+    const isCurrentMonth = month === currentCycleMonth;
+
+    return (
+        <div className="cycle-picker">
+            <button
+                type="button"
+                className="icon-btn cycle-arrow"
+                aria-label="Periode sebelumnya"
+                onClick={() => onPickMonth(shiftMonth(month, -1))}
+            >
+                <ChevronLeft size={17} />
+            </button>
+            <label className="month-btn">
+                <CalendarDays size={15} />
+                <span>{monthLabel(month)}</span>
+                <ChevronDown size={13} />
+                <input
+                    aria-label="Bulan tampilan"
+                    type="month"
+                    value={month}
+                    onChange={e => e.target.value && onPickMonth(e.target.value)}
+                />
+            </label>
+            <button
+                type="button"
+                className="icon-btn cycle-arrow"
+                aria-label="Periode berikutnya"
+                onClick={() => onPickMonth(shiftMonth(month, 1))}
+            >
+                <ChevronRight size={17} />
+            </button>
+            {!isCurrentMonth && (
+                <button
+                    type="button"
+                    className="btn sm cycle-today-btn"
+                    onClick={() => onPickMonth(currentCycleMonth)}
+                >
+                    Hari Ini
+                </button>
+            )}
+        </div>
     );
 }
 
@@ -128,22 +205,23 @@ export function PageHeader({
     month,
     startDay,
     onPickMonth,
-    onOpenStats,
+    onScanReceipt,
     onNewEntry,
 }: {
     page: Page;
     month: string;
     startDay: number;
     onPickMonth: (m: string) => void;
-    onOpenStats: () => void;
+    onScanReceipt: () => void;
     onNewEntry: () => void;
 }) {
-    const showCyclePicker = ["home", "transactions", "budgets", "stats"].includes(page) && !!month;
+    // On "transactions", the cycle picker lives directly inside the unified Transactions toolbar for better focus.
+    const showCyclePicker = ["home", "budgets", "stats"].includes(page) && !!month;
     return (
-        <div className="page-heading">
+        <div className={"page-heading" + (page === "transactions" ? " compact" : "")}>
             <div>
                 <h1>{page === "home" ? "Ringkasan Keuangan" : PAGE_LABELS[page]}</h1>
-                {showCyclePicker && (
+                {(showCyclePicker || page === "transactions") && month && (
                     <p>
                         Siklus aktif: <b>{periodRangeLabel(month, startDay)}</b>
                         {startDay !== 1 ? ` (Mulai tgl ${startDay})` : ""}
@@ -152,40 +230,12 @@ export function PageHeader({
             </div>
             <div className="heading-actions">
                 {showCyclePicker && (
-                    <div className="cycle-picker">
-                        <button
-                            type="button"
-                            className="icon-btn"
-                            aria-label="Periode sebelumnya"
-                            onClick={() => onPickMonth(shiftMonth(month, -1))}
-                        >
-                            <ChevronLeft size={17} />
-                        </button>
-                        <label className="month-btn">
-                            <CalendarDays size={16} />
-                            <span>{monthLabel(month)}</span>
-                            <ChevronDown size={14} />
-                            <input
-                                aria-label="Bulan tampilan"
-                                type="month"
-                                value={month}
-                                onChange={e => e.target.value && onPickMonth(e.target.value)}
-                            />
-                        </label>
-                        <button
-                            type="button"
-                            className="icon-btn"
-                            aria-label="Periode berikutnya"
-                            onClick={() => onPickMonth(shiftMonth(month, 1))}
-                        >
-                            <ChevronRight size={17} />
-                        </button>
-                    </div>
+                    <CyclePickerControl month={month} startDay={startDay} onPickMonth={onPickMonth} />
                 )}
-                {page === "home" && (
+                {["home", "transactions"].includes(page) && (
                     <>
-                        <button className="btn desktop-only-action" onClick={onOpenStats}>
-                            <BarChart3 size={16} /> Statistik
+                        <button className="btn desktop-only-action" onClick={onScanReceipt}>
+                            <Camera size={16} /> Foto struk
                         </button>
                         <button className="btn primary desktop-only-action" onClick={onNewEntry}>
                             <Plus size={16} /> Catat transaksi
@@ -199,29 +249,68 @@ export function PageHeader({
 
 export function BottomNav({
     page,
+    reviewCount = 0,
     onNav,
+    onNewEntry,
     onOpenMenu,
 }: {
     page: Page;
+    reviewCount?: number;
     onNav: (p: Page) => void;
+    onNewEntry: () => void;
     onOpenMenu: () => void;
 }) {
+    const HomeIcon = NAV_LINKS[0].icon;
+    const TxIcon = NAV_LINKS[1].icon;
+    const BudgetIcon = NAV_LINKS[2].icon;
+
     return (
         <nav className="bottom-nav" aria-label="Navigasi bawah">
-            {NAV_LINKS.slice(0, 4).map(({ page: p, icon: Icon }) => (
-                <button
-                    aria-current={page === p ? "page" : undefined}
-                    key={p}
-                    className={page === p ? "active" : ""}
-                    onClick={() => onNav(p)}
-                >
-                    <Icon size={19} />
-                    {PAGE_LABELS[p]}
-                </button>
-            ))}
-            <button onClick={onOpenMenu} aria-label="Menu lainnya">
-                <Menu size={19} />
-                Lainnya
+            <button
+                aria-current={page === "home" ? "page" : undefined}
+                className={page === "home" ? "active" : ""}
+                onClick={() => onNav("home")}
+            >
+                <HomeIcon size={19} />
+                <span>Ringkasan</span>
+            </button>
+            <button
+                aria-current={page === "transactions" ? "page" : undefined}
+                className={page === "transactions" ? "active" : ""}
+                onClick={() => onNav("transactions")}
+            >
+                <TxIcon size={19} />
+                <span>Transaksi</span>
+            </button>
+            <button
+                type="button"
+                className="bottom-nav-add"
+                aria-label="Catat transaksi baru"
+                onClick={onNewEntry}
+            >
+                <span className="bottom-nav-add-circle">
+                    <Plus size={22} strokeWidth={2.5} />
+                </span>
+                <span>Catat</span>
+            </button>
+            <button
+                aria-current={page === "budgets" ? "page" : undefined}
+                className={page === "budgets" ? "active" : ""}
+                onClick={() => onNav("budgets")}
+            >
+                <BudgetIcon size={19} />
+                <span>Anggaran</span>
+            </button>
+            <button
+                onClick={onOpenMenu}
+                aria-label="Menu lainnya"
+                className={["stats", "reviews", "reports", "import", "masters", "settings"].includes(page) ? "active" : ""}
+            >
+                <span className="bottom-nav-icon-wrap">
+                    <Menu size={19} />
+                    {reviewCount > 0 && <span className="bottom-nav-dot">{reviewCount}</span>}
+                </span>
+                <span>Menu</span>
             </button>
         </nav>
     );
@@ -239,7 +328,7 @@ export function QuickFab({
     onOpenEntry: (opts: { kind?: Transaction["kind"]; autoScan?: boolean }) => void;
 }) {
     return (
-        <div className="fab-container">
+        <div className="fab-container desktop-fab">
             {open && (
                 <div className="fab-menu">
                     <button

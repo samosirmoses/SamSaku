@@ -7,11 +7,13 @@ export function TxList({
     accounts,
     open,
     showDate = true,
+    highlightIds,
 }: {
     rows: Transaction[];
     accounts: Account[];
     open: (t: Transaction) => void;
     showDate?: boolean;
+    highlightIds?: Set<string>;
 }) {
     if (!rows.length) return <p className="empty">Belum ada transaksi untuk pilihan ini.</p>;
     return (
@@ -33,9 +35,10 @@ export function TxList({
                 if (!isTransfer && !isSplit && t.category_name) metaParts.push(t.category_name);
                 if (isTransfer && t.fee) metaParts.push(`Biaya ${money(t.fee)}`);
                 if (showDate) metaParts.push(shortDate(t.date));
+                const isFresh = highlightIds?.has(t.id);
 
                 return (
-                    <button key={t.id} className="tx" onClick={() => open(t)}>
+                    <button key={t.id} className={"tx" + (isFresh ? " pulse-new" : "")} onClick={() => open(t)}>
                         <span className={"tx-icon " + toneClass}>
                             <Icon size={18} />
                         </span>

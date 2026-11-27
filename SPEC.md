@@ -64,17 +64,18 @@ SamSaku adalah aplikasi pencatatan keuangan pribadi satu pemilik (*single-owner*
 ## 4. Antarmuka Pengguna (PWA) & Sinkronisasi Realtime
 
 - **Halaman utama PWA:**
-  1. **Ringkasan (`home`):** Total kekayaan likuid, kurva pengeluaran kumulatif, 4 kartu *Smart Financial Insights* (burn rate harian + proyeksi, perbandingan siklus lalu, kesehatan anggaran, pos terbesar), rincian kategori, progres anggaran, kartu dompet visual, notifikasi tinjauan, dan 5 transaksi terakhir.
-  2. **Transaksi (`transactions`):** 3 mode tampilan (**Harian**, **Kalender heatmap**, **Mingguan & Bulanan**), pencarian, filter cepat kategori/dompet/jenis, dan input langsung pada tanggal terpilih.
-  3. **Anggaran (`budgets`):** Total anggaran vs terpakai, *safe daily allowance*, daftar progres per kategori, dan daftar kategori belum beranggaran.
-  4. **Statistik (`stats`):** Grafik donat interaktif (pengeluaran & pemasukan), perbandingan siklus lalu, pola pengeluaran per hari dalam sepekan, grafik arus kas harian/mingguan, anggaran vs realisasi, dan distribusi saldo dompet.
-  5. **Laporan (`reports`):** Pratinjau laporan periode siklus atau rentang tanggal khusus, unduh **CSV** dan **PDF** (dirender di server lewat subprocess WeasyPrint terisolasi).
-  6. **Impor Excel (`import`):** Alur unggah → pemetaan kolom → pratinjau dampak → terapkan.
-  7. **Master data (`masters`):** Kelola dompet, kategori (induk/subkategori/arsip), dan status aktivitas konektor otomatis.
-  8. **Pengaturan (`settings`):** Tema Terang/Gelap (*Light/Dark Mode*), siklus bulanan, awal pekan, dompet utama, reset data Sandbox, serta **Zona Bahaya** untuk **Reset Data fleksibel** (pilih transaksi/mutasi, antrean bukti & riwayat impor, nol-kan saldo awal dompet, dan/atau anggaran bulanan dengan konfirmasi ketik `RESET`) maupun **Wipe Semua Data** (kosong total dengan konfirmasi ketik `WIPE SEMUA`) via `POST /v1/data/reset`.
-  9. **Perlu ditinjau (`reviews`):** Tautkan ke transaksi yang ada, catat sebagai transaksi baru, atau abaikan bukti.
+  1. **Ringkasan (`home`):** Hierarki 3-zona bersih: (1) banner draf tinjauan aktif (dengan **Simpan 1-Klik**) + kartu ringkasan total saldo seluruh dompet, batas aman belanja harian, dan 3 KPI arus kas siklus aktif, (2) deretan kartu dompet visual sejajar, serta (3) dua kolom seimbang berisi Transaksi Terakhir dan Pantauan Anggaran / Pos Pengeluaran Terbesar.
+  2. **Input Cepat (`EntryForm` & `CategoryPicker`):** Mode cepat 1-layar dengan nominal besar auto-fokus (preset & pengali `.000`), tanggal cepat (`Hari ini` / `Kemarin` / pilih tanggal) + tombol ringkas Scan Struk AI, pemilih kategori pintar (chip kategori paling sering dipakai + panel pencarian & grup hirarki Induk → Subkategori), dompet utama terpilih otomatis dengan estimasi sisa saldo, catatan singkat dengan saran kategori non-intrusif, opsi lanjutan terlipat (Split kategori & Refund), serta footer *sticky* dengan tombol **Simpan & Lagi** untuk input beruntun. Di layar mobile, tombol utama `+ Catat` berada tepat di tengah navigasi bawah.
+  3. **Transaksi (`transactions`):** 3 mode tampilan (**Harian**, **Kalender**, **Mingguan**) yang menyatu dengan pemilih siklus (`< Bulan >` + `Hari Ini`) tanpa mereset mode tampilan saat berpindah bulan, dilengkapi pencarian cepat, laci filter terlipat (Dompet, Jenis, Kategori) dengan chip indikator aktif, serta rekap 1 baris.
+  4. **Anggaran (`budgets`):** Total anggaran vs terpakai, *safe daily allowance*, daftar progres per kategori, dan daftar kategori belum beranggaran.
+  5. **Statistik (`stats`):** Grafik donat interaktif (pengeluaran & pemasukan), perbandingan siklus lalu, pola pengeluaran per hari dalam sepekan, grafik arus kas harian/mingguan, anggaran vs realisasi, dan distribusi saldo dompet.
+  6. **Tinjauan (`reviews`):** Dapat diakses langsung dari Sidebar & Topbar dengan badge jumlah antrean *live*; mendukung **Simpan 1-Klik**, ubah/tautkan ke transaksi yang ada, atau abaikan bukti.
+  7. **Laporan (`reports`):** Pratinjau laporan periode siklus atau rentang tanggal khusus, unduh **CSV** dan **PDF** (dirender di server lewat subprocess WeasyPrint terisolasi).
+  8. **Impor Excel (`import`):** Alur unggah → pemetaan kolom → pratinjau dampak → terapkan.
+  9. **Master data (`masters`):** Kelola dompet, kategori (induk/subkategori/arsip), dan status aktivitas konektor otomatis.
+  10. **Pengaturan (`settings`):** Tema Terang/Gelap (*Light/Dark Mode*), siklus bulanan, awal pekan, dompet utama, reset data Sandbox, serta **Zona Bahaya** untuk **Reset Data fleksibel** (pilih transaksi/mutasi, antrean bukti & riwayat impor, nol-kan saldo awal dompet, dan/atau anggaran bulanan dengan konfirmasi ketik `RESET`) maupun **Wipe Semua Data** (kosong total dengan konfirmasi ketik `WIPE SEMUA`) via `POST /v1/data/reset`.
 - **Mode Sandbox Interaktif:** Saat belum login ke server, pengguna dapat menjelajahi seluruh fitur dengan data contoh di `localStorage` (kode `demo.ts` di-load dinamis hanya saat belum login).
-- **Sinkronisasi Realtime (`WS /v1/ws`):** Mutasi dari perangkat lain, Telegram, Gmail, atau Android langsung mengirim event `sync` ke browser aktif untuk melakukan *silent refresh* tanpa reload halaman.
+- **Sinkronisasi Realtime (`WS /v1/ws`):** Mutasi dari perangkat lain, Telegram, Gmail, atau Android langsung mengirim event `sync` ke browser aktif untuk melakukan *silent refresh* *in-place* (bebas kedip, anti-stale cache) lengkap dengan efek *highlight* pada item baru dan notifikasi *toast* interaktif.
 
 ---
 

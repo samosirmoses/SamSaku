@@ -1,5 +1,5 @@
 "use client";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Calendar, CheckCircle2, Moon, RotateCcw, Settings as SettingsIcon, Sun, Wallet } from "lucide-react";
 import { ErrorNote, Field } from "../../components/ui";
 import { DangerZone } from "./DangerZone";
@@ -35,6 +35,12 @@ export function SettingsView({
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState("");
     const [saved, setSaved] = useState(false);
+
+    useEffect(() => {
+        setMonthlyStartDay(data.settings?.monthly_start_day || 1);
+        setWeeklyStartDay(data.settings?.weekly_start_day ?? 1);
+        setDefaultAccountId(data.settings?.default_account_id || "");
+    }, [data.settings?.monthly_start_day, data.settings?.weekly_start_day, data.settings?.default_account_id]);
 
     async function submit(e: FormEvent<HTMLFormElement>) {
         e.preventDefault();

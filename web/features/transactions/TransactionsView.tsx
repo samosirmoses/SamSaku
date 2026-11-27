@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
     ArrowLeftRight,
     Calendar as CalendarIcon,
@@ -10,11 +10,14 @@ import {
     List,
     Plus,
     Search,
+    SlidersHorizontal,
     X,
 } from "lucide-react";
+import { CyclePickerControl } from "../../components/layout/AppChrome";
 import { TxList } from "../../components/ui";
 import {
     type Data,
+    type Review,
     type Transaction,
     categoryMatches,
     compactMoney,
@@ -28,12 +31,17 @@ import {
     today,
     weekdayShort,
 } from "../../lib/domain";
+import { PendingDraftsBanner } from "../reviews/PendingDraftsBanner";
 
-type ViewMode = "daily" | "calendar" | "monthly";
+export type TxViewMode = "daily" | "calendar" | "monthly";
 
 export function TransactionsView({
     data,
     month,
+    view,
+    setView,
+    highlightIds,
+    onPickMonth,
     filter,
     setFilter,
     accountFilter,
@@ -44,9 +52,17 @@ export function TransactionsView({
     onAddAtDate,
     onScanAtDate,
     onTransferAtDate,
+    onSelectReview,
+    onOpenAllReviews,
+    onReviewResolved,
+    onError,
 }: {
     data: Data;
     month: string;
+    view: TxViewMode;
+    setView: (v: TxViewMode) => void;
+    highlightIds?: Set<string>;
+    onPickMonth: (m: string) => void;
     filter: string;
     setFilter: (v: string) => void;
     accountFilter: string;
@@ -57,9 +73,13 @@ export function TransactionsView({
     onAddAtDate: (date: string, kind?: Transaction["kind"]) => void;
     onScanAtDate: (date?: string) => void;
     onTransferAtDate: (date?: string) => void;
+    onSelectReview: (r: Review) => void;
+    onOpenAllReviews: () => void;
+    onReviewResolved: (msg: string) => void;
+    onError?: (msg: string) => void;
 }) {
-    const [view, setView] = useState<ViewMode>("daily");
     const [kindFilter, setKindFilter] = useState<string>("");
+    const [filterOpen, setFilterOpen] = useState<boolean>(false);
 
     const startDay = data.settings?.monthly_start_day || 1;
     const weekStart = data.settings?.weekly_start_day ?? 1;
@@ -67,6 +87,20 @@ export function TransactionsView({
     const defaultSelectedDate = today() >= range.start && today() <= range.end ? today() : range.start;
     const [selectedDate, setSelectedDate] = useState<string>(defaultSelectedDate);
     const [openWeekIdx, setOpenWeekIdx] = useState<number | null>(0);
+
+    // Smoothly align selected calendar date & weekly accordion whenever cycle month changes without resetting `view`!
+    useEffect(() => {
+        const nextRange = period(month, startDay);
+        const t = today();
+        setSelectedDate(prev =>
+            prev >= nextRange.start && prev <= nextRange.end
+                ? prev
+                : t >= nextRange.start && t <= nextRange.end
+                  ? t
+                  : nextRange.start
+        );
+        setOpenWeekIdx(0);
+    }, [month, startDay]);
 
     const filteredRows = useMemo(() => {
         const needle = search.trim().toLowerCase();
@@ -200,10 +234,30 @@ export function TransactionsView({
         ...new Set([...data.categories.map(c => c.name), ...data.summary.categories.map(c => c.name)]),
     ];
 
+    const activeFilterCount = (filter ? 1 : 0) + (accountFilter ? 1 : 0) + (kindFilter ? 1 : 0);
+    const activeAccountObj = accountFilter ? data.accounts.find(a => a.id === accountFilter) : null;
+
+    function clearAllFilters() {
+        setFilter("");
+        setAccountFilter("");
+        setKindFilter("");
+        setSearch("");
+    }
+
     return (
         <div className="stack">
-            <section className="card">
-                <div className="tx-toolbar">
+            <PendingDraftsBanner
+                data={data}
+                highlightIds={highlightIds}
+                onSelectReview={onSelectReview}
+                onOpenAllReviews={onOpenAllReviews}
+                onResolved={onReviewResolved}
+                onError={onError}
+            />
+
+            <section className="card tx-slim-card">
+                {/* Unified Top Row: View Mode Switcher + Cycle Month Picker */}
+                <div className="tx-unified-bar">
                     <div className="view-switcher" role="tablist" aria-label="Mode tampilan transaksi">
                         <button
                             type="button"
@@ -212,7 +266,7 @@ export function TransactionsView({
                             className={view === "daily" ? "active" : ""}
                             onClick={() => setView("daily")}
                         >
-                            <List size={16} /> Harian
+                            <List size={15} /> Harian
                         </button>
                         <button
                             type="button"
@@ -221,7 +275,7 @@ export function TransactionsView({
                             className={view === "calendar" ? "active" : ""}
                             onClick={() => setView("calendar")}
                         >
-                            <CalendarIcon size={16} /> Kalender
+                            <CalendarIcon size={15} /> Kalender
                         </button>
                         <button
                             type="button"
@@ -230,117 +284,155 @@ export function TransactionsView({
                             className={view === "monthly" ? "active" : ""}
                             onClick={() => setView("monthly")}
                         >
-                            <Layers size={16} /> Mingguan & Bulanan
+                            <Layers size={15} /> Mingguan
                         </button>
                     </div>
 
-                    <div className="btns">
-                        <button
-                            type="button"
-                            className="btn"
-                            onClick={() => onScanAtDate(view === "calendar" ? activeCalendarDate : undefined)}
-                        >
-                            <Camera size={16} /> Foto struk
-                        </button>
-                        {data.accounts.length >= 2 && (
-                            <button
-                                type="button"
-                                className="btn"
-                                onClick={() => onTransferAtDate(view === "calendar" ? activeCalendarDate : undefined)}
-                            >
-                                <ArrowLeftRight size={16} /> Transfer
-                            </button>
-                        )}
-                        <button
-                            type="button"
-                            className="btn primary"
-                            onClick={() => onAddAtDate(view === "calendar" ? activeCalendarDate : today())}
-                        >
-                            <Plus size={16} /> Catat transaksi
-                        </button>
-                    </div>
+                    <CyclePickerControl month={month} startDay={startDay} onPickMonth={onPickMonth} />
                 </div>
 
-                <div className="filter-stack">
-                    <div className="filter-bar" style={{ marginBottom: 0 }}>
-                        <label className="search">
-                            <Search size={17} />
-                            <input
-                                placeholder="Cari transaksi, toko, dompet, atau nominal…"
-                                aria-label="Cari transaksi"
-                                value={search}
-                                onChange={e => setSearch(e.target.value)}
-                            />
-                            {search && (
-                                <button
-                                    type="button"
-                                    className="icon-btn"
-                                    style={{ width: 28, height: 28, minHeight: 28 }}
-                                    onClick={() => setSearch("")}
-                                >
-                                    <X size={14} />
-                                </button>
-                            )}
-                        </label>
-                        <select aria-label="Filter kategori" value={filter} onChange={e => setFilter(e.target.value)}>
-                            <option value="">Semua kategori</option>
-                            {allCategoryNames.map(c => (
-                                <option key={c} value={c}>
-                                    {c}
-                                </option>
-                            ))}
-                        </select>
-                    </div>
+                {/* Slim Search + Collapsible Filter Trigger */}
+                <div className="tx-search-filter-row">
+                    <label className="search">
+                        <Search size={16} />
+                        <input
+                            placeholder="Cari transaksi, toko, dompet, atau nominal…"
+                            aria-label="Cari transaksi"
+                            value={search}
+                            onChange={e => setSearch(e.target.value)}
+                        />
+                        {search && (
+                            <button
+                                type="button"
+                                className="icon-btn sm-icon"
+                                aria-label="Bersihkan pencarian"
+                                onClick={() => setSearch("")}
+                            >
+                                <X size={14} />
+                            </button>
+                        )}
+                    </label>
 
-                    <div className="quick-filter-pills">
-                        <button
-                            type="button"
-                            className={"filter-pill " + (!accountFilter ? "active" : "")}
-                            onClick={() => setAccountFilter("")}
-                        >
-                            Semua Dompet
-                        </button>
-                        {data.accounts.map(a => (
-                            <button
-                                type="button"
-                                key={a.id}
-                                className={"filter-pill " + (accountFilter === a.id ? "active" : "")}
-                                onClick={() => setAccountFilter(accountFilter === a.id ? "" : a.id)}
-                            >
-                                {a.name}
+                    <button
+                        type="button"
+                        className={"btn filter-toggle-btn " + (filterOpen || activeFilterCount > 0 ? "active" : "")}
+                        onClick={() => setFilterOpen(v => !v)}
+                    >
+                        <SlidersHorizontal size={15} />
+                        <span>Filter{activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}</span>
+                    </button>
+                </div>
+
+                {/* Active filter badges when drawer is closed */}
+                {!filterOpen && activeFilterCount > 0 && (
+                    <div className="active-filters-strip">
+                        {activeAccountObj && (
+                            <button type="button" className="filter-pill active" onClick={() => setAccountFilter("")}>
+                                Dompet: {activeAccountObj.name} <X size={12} />
                             </button>
-                        ))}
-                        <span className="pill-divider" />
-                        {(["", "expense", "income", "transfer"] as const).map(k => (
-                            <button
-                                type="button"
-                                key={k || "all"}
-                                className={`filter-pill ${k} ${kindFilter === k ? "active" : ""}`}
-                                onClick={() => setKindFilter(kindFilter === k ? "" : k)}
-                            >
-                                {k ? kindLabels[k] : "Semua Jenis"}
+                        )}
+                        {kindFilter && (
+                            <button type="button" className="filter-pill active" onClick={() => setKindFilter("")}>
+                                Jenis: {kindLabels[kindFilter as Transaction["kind"]]} <X size={12} />
                             </button>
-                        ))}
+                        )}
                         {filter && (
                             <button type="button" className="filter-pill active" onClick={() => setFilter("")}>
                                 Kategori: {filter} <X size={12} />
                             </button>
                         )}
+                        <button type="button" className="text-btn sm" onClick={clearAllFilters}>
+                            Reset semua
+                        </button>
                     </div>
-                </div>
+                )}
 
-                <div className="tx-summary-strip">
+                {/* Collapsible Filter Drawer */}
+                {filterOpen && (
+                    <div className="filter-drawer">
+                        <div className="filter-drawer-group">
+                            <small className="filter-drawer-label">Dompet</small>
+                            <div className="quick-filter-pills wrap">
+                                <button
+                                    type="button"
+                                    className={"filter-pill " + (!accountFilter ? "active" : "")}
+                                    onClick={() => setAccountFilter("")}
+                                >
+                                    Semua Dompet
+                                </button>
+                                {data.accounts.map(a => (
+                                    <button
+                                        type="button"
+                                        key={a.id}
+                                        className={"filter-pill " + (accountFilter === a.id ? "active" : "")}
+                                        onClick={() => setAccountFilter(accountFilter === a.id ? "" : a.id)}
+                                    >
+                                        {a.name}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="filter-drawer-row">
+                            <div className="filter-drawer-group">
+                                <small className="filter-drawer-label">Jenis Transaksi</small>
+                                <div className="quick-filter-pills wrap">
+                                    {(["", "expense", "income", "transfer"] as const).map(k => (
+                                        <button
+                                            type="button"
+                                            key={k || "all"}
+                                            className={`filter-pill ${k} ${kindFilter === k ? "active" : ""}`}
+                                            onClick={() => setKindFilter(kindFilter === k ? "" : k)}
+                                        >
+                                            {k ? kindLabels[k] : "Semua"}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="filter-drawer-group">
+                                <small className="filter-drawer-label">Kategori</small>
+                                <select
+                                    aria-label="Filter kategori"
+                                    value={filter}
+                                    onChange={e => setFilter(e.target.value)}
+                                >
+                                    <option value="">Semua kategori</option>
+                                    {allCategoryNames.map(c => (
+                                        <option key={c} value={c}>
+                                            {c}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+
+                        {activeFilterCount > 0 && (
+                            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                                <button type="button" className="text-btn sm" onClick={clearAllFilters}>
+                                    Reset semua filter
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Compact Summary Strip */}
+                <div className="tx-summary-compact">
                     <span>
                         <b>{filteredRows.length}</b> transaksi
                     </span>
+                    <span className="summary-dot">·</span>
                     <span>
-                        Uang Masuk: <strong className="income">+{money(filteredIncome)}</strong>
+                        Masuk <strong className="income">+{money(filteredIncome)}</strong>
                     </span>
+                    <span className="summary-dot">·</span>
                     <span>
-                        Uang Keluar: <strong className="expense-amt">−{money(filteredExpense)}</strong>
+                        Keluar <strong className="expense-amt">−{money(filteredExpense)}</strong>
                     </span>
+                    <span className="summary-dot">·</span>
                     <span>
-                        Selisih:{" "}
+                        Selisih{" "}
                         <strong className={filteredIncome - filteredExpense >= 0 ? "income" : "expense-amt"}>
                             {filteredIncome - filteredExpense > 0 ? "+" : ""}
                             {money(filteredIncome - filteredExpense)}
@@ -357,7 +449,7 @@ export function TransactionsView({
                                 <div className="daily-header">
                                     <div>
                                         <strong>{fullDate(group.date)}</strong>
-                                        <small className="muted">{group.items.length} transaksi</small>
+                                        <small className="muted"> · {group.items.length} transaksi</small>
                                     </div>
                                     <div className="daily-header-right">
                                         {group.inc > 0 && (
@@ -376,12 +468,36 @@ export function TransactionsView({
                                         </button>
                                     </div>
                                 </div>
-                                <TxList rows={group.items} accounts={data.accounts} open={onOpenTx} showDate={false} />
+                                <TxList
+                                    rows={group.items}
+                                    accounts={data.accounts}
+                                    open={onOpenTx}
+                                    showDate={false}
+                                    highlightIds={highlightIds}
+                                />
                             </section>
                         ))
                     ) : (
-                        <section className="card">
-                            <p className="empty">Belum ada transaksi untuk filter ini.</p>
+                        <section className="card empty-state-card">
+                            <p className="empty">
+                                {activeFilterCount > 0 || search
+                                    ? "Tidak ada transaksi yang cocok dengan pencarian/filter ini."
+                                    : "Belum ada transaksi tercatat pada siklus ini."}
+                            </p>
+                            <div className="btns">
+                                {(activeFilterCount > 0 || search) && (
+                                    <button type="button" className="btn sm" onClick={clearAllFilters}>
+                                        Reset filter
+                                    </button>
+                                )}
+                                <button
+                                    type="button"
+                                    className="btn primary sm"
+                                    onClick={() => onAddAtDate(defaultSelectedDate)}
+                                >
+                                    <Plus size={14} /> Catat transaksi
+                                </button>
+                            </div>
                         </section>
                     )}
                 </div>
@@ -478,11 +594,12 @@ export function TransactionsView({
                                 accounts={data.accounts}
                                 open={onOpenTx}
                                 showDate={false}
+                                highlightIds={highlightIds}
                             />
                         ) : (
                             <p className="empty">
-                                Tidak ada transaksi pada tanggal ini. Klik tombol di atas untuk mencatat transaksi
-                                langsung di tanggal {shortDate(activeCalendarDate)}.
+                                Tidak ada transaksi pada tanggal {shortDate(activeCalendarDate)}. Gunakan tombol di atas
+                                untuk langsung mencatat di tanggal ini.
                             </p>
                         )}
                     </section>
@@ -491,41 +608,6 @@ export function TransactionsView({
 
             {view === "monthly" && (
                 <div className="stack">
-                    <section className="card">
-                        <div className="section-title">
-                            <div>
-                                <h2>
-                                    Rekap siklus ({shortDate(range.start)} – {shortDate(range.end)})
-                                </h2>
-                                <small className="muted">{filteredRows.length} transaksi dalam siklus ini</small>
-                            </div>
-                            <button
-                                type="button"
-                                className="btn primary sm"
-                                onClick={() => onAddAtDate(defaultSelectedDate)}
-                            >
-                                <Plus size={14} /> Catat di siklus ini
-                            </button>
-                        </div>
-                        <div className="monthly-kpi-row">
-                            <div>
-                                <small className="muted">Total Uang Masuk</small>
-                                <strong className="income">+{money(filteredIncome)}</strong>
-                            </div>
-                            <div>
-                                <small className="muted">Total Uang Keluar</small>
-                                <strong className="expense-amt">−{money(filteredExpense)}</strong>
-                            </div>
-                            <div>
-                                <small className="muted">Selisih Bersih</small>
-                                <strong className={filteredIncome - filteredExpense >= 0 ? "income" : "expense-amt"}>
-                                    {filteredIncome - filteredExpense > 0 ? "+" : ""}
-                                    {money(filteredIncome - filteredExpense)}
-                                </strong>
-                            </div>
-                        </div>
-                    </section>
-
                     {weeklyGroups.map((w, idx) => {
                         const isOpen = openWeekIdx === idx;
                         const net = w.inc - w.exp;
@@ -566,7 +648,12 @@ export function TransactionsView({
                                 </div>
                                 {isOpen && (
                                     <div style={{ marginTop: 12 }}>
-                                        <TxList rows={w.items} accounts={data.accounts} open={onOpenTx} />
+                                        <TxList
+                                            rows={w.items}
+                                            accounts={data.accounts}
+                                            open={onOpenTx}
+                                            highlightIds={highlightIds}
+                                        />
                                     </div>
                                 )}
                             </section>

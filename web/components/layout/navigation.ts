@@ -4,6 +4,7 @@ import {
     FileChartColumnIncreasing,
     FileSpreadsheet,
     Home,
+    Inbox,
     ReceiptText,
     Settings as SettingsIcon,
     Wallet,
@@ -14,22 +15,22 @@ export type Page =
     | "transactions"
     | "budgets"
     | "stats"
+    | "reviews"
     | "reports"
     | "import"
     | "masters"
-    | "settings"
-    | "reviews";
+    | "settings";
 
 export const PAGE_LABELS: Record<Page, string> = {
     home: "Ringkasan",
     transactions: "Transaksi",
     budgets: "Anggaran",
     stats: "Statistik",
+    reviews: "Tinjauan",
     reports: "Laporan",
     import: "Impor Excel",
     masters: "Master data",
     settings: "Pengaturan",
-    reviews: "Perlu ditinjau",
 };
 
 export const NAV_LINKS = [
@@ -37,6 +38,7 @@ export const NAV_LINKS = [
     { page: "transactions", icon: ReceiptText },
     { page: "budgets", icon: Wallet },
     { page: "stats", icon: BarChart3 },
+    { page: "reviews", icon: Inbox },
     { page: "reports", icon: FileChartColumnIncreasing },
     { page: "import", icon: FileSpreadsheet },
     { page: "masters", icon: Database },

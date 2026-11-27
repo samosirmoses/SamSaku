@@ -7,12 +7,16 @@ import {
     ArrowUpRight,
     Camera,
     CheckCircle2,
+    ChevronDown,
+    ChevronUp,
     Plus,
     RotateCcw,
+    SlidersHorizontal,
     Sparkles,
     Trash2,
+    X,
 } from "lucide-react";
-import { CatIcon, ErrorNote, Field, WalletIcon } from "../../components/ui";
+import { ErrorNote, Field, WalletIcon } from "../../components/ui";
 import { del, get, post, put, request } from "../../lib/api";
 import {
     type Data,
@@ -20,12 +24,21 @@ import {
     formatDots,
     inferCategoryClient,
     kindLabels,
+    matchCategoryClient,
     money,
     parseDigits,
+    shortDate,
     today,
 } from "../../lib/domain";
+import { CategoryPicker } from "./CategoryPicker";
 
 const toErr = (e: unknown) => (e instanceof Error ? e.message : "Gagal menyimpan perubahan.");
+
+function shiftIsoDays(iso: string, deltaDays: number): string {
+    const d = new Date(iso + "T12:00:00");
+    d.setDate(d.getDate() + deltaDays);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
 type ScanResult = {
     kind?: Transaction["kind"];
@@ -51,6 +64,7 @@ type ScanResult = {
 export function EntryForm({
     data,
     onDone,
+    onSavedKeepOpen,
     tx,
     autoScan = false,
     submitPath,
@@ -59,6 +73,7 @@ export function EntryForm({
 }: {
     data: Data;
     onDone: () => void;
+    onSavedKeepOpen?: () => void;
     tx?: Transaction | null;
     autoScan?: boolean;
     submitPath?: string;
@@ -108,6 +123,8 @@ export function EntryForm({
             initial.category_id ||
             ""
     );
+    const [userPickedCat, setUserPickedCat] = useState<boolean>(!!(tx?.category_id || initial.category_id));
+    const [autoSuggestedCat, setAutoSuggestedCat] = useState<boolean>(false);
     const [splitAmount, setSplitAmount] = useState<string>(
         hasExistingSplits && tx?.splits?.[0] ? String(Math.abs(tx.splits[0].amount)) : ""
     );
@@ -115,19 +132,35 @@ export function EntryForm({
         hasExistingSplits && tx?.splits?.[1] ? tx.splits[1].category_id || "" : ""
     );
 
+    const [showAdvanced, setShowAdvanced] = useState<boolean>(
+        hasExistingSplits || (tx?.kind || initial.kind) === "refund"
+    );
     const [categories, setCategories] = useState(data.categories);
-    const [inline, setInline] = useState(false);
-    const [newName, setNewName] = useState("");
     const [expenses, setExpenses] = useState(data.transactions.filter(t => t.kind === "expense" && t.id !== tx?.id));
     const [error, setError] = useState("");
     const [busy, setBusy] = useState(false);
     const [scanning, setScanning] = useState(false);
     const [scanInfo, setScanInfo] = useState<string>("");
+    const [savedFlash, setSavedFlash] = useState<string>("");
     const [receiptPreviewUrl, setReceiptPreviewUrl] = useState<string>("");
     const [amountOptions, setAmountOptions] = useState<number[]>([]);
     const [confirmDelete, setConfirmDelete] = useState(false);
+
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const amountInputRef = useRef<HTMLInputElement>(null);
     const sourceRef = useRef("");
+    const keepOpenAfterSubmit = useRef(false);
+
+    useEffect(() => {
+        setCategories(data.categories);
+    }, [data.categories]);
+
+    useEffect(() => {
+        if (!tx && !autoScan && !submitPath) {
+            const t = setTimeout(() => amountInputRef.current?.focus(), 40);
+            return () => clearTimeout(t);
+        }
+    }, [tx, autoScan, submitPath]);
 
     useEffect(() => {
         return () => {
@@ -159,6 +192,7 @@ export function EntryForm({
         setScanning(true);
         setError("");
         setScanInfo("");
+        setSavedFlash("");
         setAmountOptions([]);
         try {
             const form = new FormData();
@@ -190,9 +224,9 @@ export function EntryForm({
                     data.accounts.find(a => a.id === (res.to_account_id || toAccountId))?.name ||
                     "Dompet tujuan";
                 const feeNote = res.fee ? ` · Admin ${money(res.fee)}` : "";
-                const guessNote = res.account_guessed ? " (dompet asal perkiraan)" : "";
+                const guessNote = res.account_guessed ? " (dompet perkiraan)" : "";
                 setScanInfo(
-                    `Terdeteksi: Transfer · ${fromLabel} → ${toLabel}${feeNote}${guessNote} · Tanggal: ${res.date || today()}`
+                    `Terdeteksi: Transfer · ${fromLabel} → ${toLabel}${feeNote}${guessNote} · ${res.date || today()}`
                 );
             } else {
                 setFee("0");
@@ -200,13 +234,16 @@ export function EntryForm({
                     res.category_id ||
                     (detectedKind === "expense"
                         ? inferCategoryClient(res.merchant || file.name, categories, data.transactions)
-                        : "");
-                if (autoCat) setCatId(autoCat);
+                        : matchCategoryClient(res.merchant || file.name, categories, data.transactions, "income"));
+                if (autoCat) {
+                    setCatId(autoCat);
+                    setAutoSuggestedCat(true);
+                }
                 const catLabel = res.category_name || categories.find(c => c.id === autoCat)?.name || "Otomatis";
                 const typeTag = res.transaction_type ? ` (${res.transaction_type})` : "";
                 const guessNote = res.account_guessed ? " · Dompet perkiraan" : "";
                 setScanInfo(
-                    `Terdeteksi: ${kindLabels[detectedKind]}${typeTag} · Kategori: ${catLabel}${guessNote} · Tanggal: ${res.date || today()}`
+                    `Terdeteksi: ${kindLabels[detectedKind]}${typeTag} · ${catLabel}${guessNote} · ${res.date || today()}`
                 );
             }
         } catch (scanErr) {
@@ -215,11 +252,12 @@ export function EntryForm({
             setKind("expense");
             if (cleanName) setDescription(cleanName);
             if (numMatch) setAmount(numMatch[1]);
-            const autoCat = inferCategoryClient(cleanName, categories, data.transactions);
-            if (autoCat) setCatId(autoCat);
-            setScanInfo(
-                `Kategori (${categories.find(c => c.id === autoCat)?.name || "Pengeluaran"}) & tanggal terisi otomatis. Silakan konfirmasi nominal.`
-            );
+            const autoCat = matchCategoryClient(cleanName, categories, data.transactions, "expense");
+            if (autoCat) {
+                setCatId(autoCat);
+                setAutoSuggestedCat(true);
+            }
+            setScanInfo("Silakan periksa nominal & kategori sebelum menyimpan.");
             setError(scanErr instanceof Error ? scanErr.message : "");
         } finally {
             setScanning(false);
@@ -227,33 +265,15 @@ export function EntryForm({
         }
     }
 
-    async function addCategory() {
-        const name = newName.trim();
-        if (!name) return;
-        setBusy(true);
-        setError("");
-        try {
-            const c = await post<Data["categories"][number]>("/categories", {
-                name,
-                code: name.toUpperCase().replace(/[^A-Z0-9]+/g, "-") || "CAT",
-                kind: kind === "income" ? "income" : "expense",
-            });
-            setCategories(v => [...v, c]);
-            setCatId(c.id);
-            setInline(false);
-            setNewName("");
-        } catch (e) {
-            setError(toErr(e));
-        } finally {
-            setBusy(false);
-        }
-    }
-
     async function submit(e: FormEvent<HTMLFormElement>) {
         e.preventDefault();
+        const wantKeepOpen = keepOpenAfterSubmit.current;
+        keepOpenAfterSubmit.current = false;
+
         const numAmount = parseDigits(amount);
         if (!numAmount || numAmount <= 0) {
             setError("Masukkan nominal transaksi yang valid.");
+            amountInputRef.current?.focus();
             return;
         }
         if (!sourceRef.current) sourceRef.current = crypto.randomUUID();
@@ -267,6 +287,7 @@ export function EntryForm({
             category_id: kind === "transfer" ? null : catId || null,
         };
         setError("");
+        setSavedFlash("");
         if (split && kind !== "transfer" && kind !== "refund") {
             const a = parseDigits(splitAmount);
             const b = splitCatId;
@@ -305,7 +326,26 @@ export function EntryForm({
             } else {
                 await post(submitPath || "/transactions", wrap ? wrap(payload) : payload);
             }
-            onDone();
+
+            if (wantKeepOpen && !tx && !submitPath) {
+                sourceRef.current = crypto.randomUUID();
+                const savedLabel = money(numAmount);
+                setAmount("");
+                setDescription("");
+                setFee("0");
+                setSplit(false);
+                setSplitAmount("");
+                setSplitCatId("");
+                setScanInfo("");
+                setAmountOptions([]);
+                setUserPickedCat(false);
+                setAutoSuggestedCat(false);
+                setSavedFlash(`Tersimpan (${savedLabel}). Lanjut catat transaksi berikutnya!`);
+                onSavedKeepOpen?.();
+                setTimeout(() => amountInputRef.current?.focus(), 30);
+            } else {
+                onDone();
+            }
         } catch (e) {
             setError(toErr(e));
         } finally {
@@ -333,60 +373,136 @@ export function EntryForm({
     const numFee = parseDigits(fee);
     const fromAcc = data.accounts.find(a => a.id === accountId);
     const toAcc = data.accounts.find(a => a.id === toAccountId);
+    const todayIso = today();
+    const yesterdayIso = shiftIsoDays(todayIso, -1);
+
+    const activeAccountAfterBalance =
+        fromAcc && fromAcc.balance != null && numAmount > 0
+            ? kind === "income" || kind === "refund"
+                ? fromAcc.balance + numAmount
+                : kind === "expense"
+                  ? fromAcc.balance - numAmount
+                  : fromAcc.balance - numAmount - numFee
+            : null;
 
     return (
-        <form className="form" onSubmit={submit}>
-            <div className="kind-tabs" role="tablist" aria-label="Jenis transaksi">
-                {(["expense", "income", "transfer", "refund"] as const).map(k => {
-                    const Icon =
-                        k === "expense"
-                            ? ArrowUpRight
-                            : k === "income"
-                              ? ArrowDownLeft
-                              : k === "transfer"
-                                ? ArrowLeftRight
-                                : RotateCcw;
-                    return (
+        <form className="form quick-entry-form" onSubmit={submit}>
+            {kind === "refund" ? (
+                <div className="refund-mode-banner">
+                    <span>
+                        <RotateCcw size={15} /> Mode <b>Refund Pengeluaran</b>
+                    </span>
+                    {!tx && (
                         <button
                             type="button"
-                            role="tab"
-                            aria-selected={kind === k}
-                            key={k}
-                            className={`kind-tab ${k} ${kind === k ? "active" : ""}`}
+                            className="btn sm"
                             onClick={() => {
-                                setKind(k);
-                                if (k === "transfer") setSplit(false);
-                                const validCat = categories.find(
-                                    c => c.id === catId && c.kind === (k === "income" ? "income" : "expense")
-                                );
-                                if (!validCat) setCatId("");
+                                setKind("expense");
+                                setOriginalId("");
                             }}
                         >
-                            <Icon size={15} />
-                            <span>{kindLabels[k]}</span>
+                            <X size={13} /> Kembali ke Pengeluaran
                         </button>
-                    );
-                })}
+                    )}
+                </div>
+            ) : (
+                <div className="kind-tabs three-tabs" role="tablist" aria-label="Jenis transaksi">
+                    {(["expense", "income", "transfer"] as const).map(k => {
+                        const Icon = k === "expense" ? ArrowUpRight : k === "income" ? ArrowDownLeft : ArrowLeftRight;
+                        return (
+                            <button
+                                type="button"
+                                role="tab"
+                                aria-selected={kind === k}
+                                key={k}
+                                className={`kind-tab ${k} ${kind === k ? "active" : ""}`}
+                                onClick={() => {
+                                    setKind(k);
+                                    if (k === "transfer") setSplit(false);
+                                    const validCat = categories.find(
+                                        c => c.id === catId && c.kind === (k === "income" ? "income" : "expense")
+                                    );
+                                    if (!validCat) {
+                                        setCatId("");
+                                        setUserPickedCat(false);
+                                        setAutoSuggestedCat(false);
+                                    }
+                                }}
+                            >
+                                <Icon size={15} />
+                                <span>{kindLabels[k]}</span>
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
+
+            {/* Compact Meta Bar: Quick Date + Scan Struk */}
+            <div className="entry-meta-strip">
+                <div className="quick-date-group">
+                    <button
+                        type="button"
+                        className={"date-chip " + (txDate === todayIso ? "active" : "")}
+                        onClick={() => setTxDate(todayIso)}
+                    >
+                        Hari ini
+                    </button>
+                    <button
+                        type="button"
+                        className={"date-chip " + (txDate === yesterdayIso ? "active" : "")}
+                        onClick={() => setTxDate(yesterdayIso)}
+                    >
+                        Kemarin
+                    </button>
+                    <label className={"date-chip picker " + (txDate !== todayIso && txDate !== yesterdayIso ? "active" : "")}>
+                        <span>
+                            {txDate !== todayIso && txDate !== yesterdayIso ? shortDate(txDate) : "Pilih tgl"}
+                        </span>
+                        <input
+                            type="date"
+                            name="date"
+                            aria-label="Tanggal transaksi"
+                            value={txDate}
+                            onChange={e => e.target.value && setTxDate(e.target.value)}
+                            required
+                        />
+                    </label>
+                </div>
+
+                {!tx && !autoScan && (
+                    <label className="btn sm scan-compact-btn">
+                        <Camera size={14} />
+                        <span>{scanning ? "Membaca…" : receiptPreviewUrl ? "Ganti Struk" : "Scan Struk"}</span>
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            disabled={scanning || busy}
+                            onChange={handleReceiptFile}
+                        />
+                    </label>
+                )}
             </div>
 
-            {!tx && (
+            {/* Highlighted Receipt Box only when opened in autoScan mode or actively previewing */}
+            {!tx && (autoScan || receiptPreviewUrl || scanning) && (
                 <div className={"receipt-autofill " + (autoScan ? "highlighted" : "")}>
                     {receiptPreviewUrl && (
                         <img src={receiptPreviewUrl} alt="Pratinjau struk" className="receipt-thumb" />
                     )}
                     <div className="receipt-autofill-text">
                         <strong>
-                            <Sparkles size={15} /> Auto-Fill dari Foto Struk / Bukti Transfer
+                            <Sparkles size={15} /> Auto-Fill Struk / Bukti Transfer AI
                         </strong>
                         <small>
                             {scanning
-                                ? "Sedang membaca jenis transaksi, berita, nominal, dompet & kategori…"
-                                : "Unggah struk belanja atau bukti transfer BCA — otomatis kenali pengeluaran, pemasukan, atau transfer antar dompet."}
+                                ? "Sedang mengenali nominal, dompet, & kategori…"
+                                : "Foto struk belanja atau bukti transfer otomatis mengisi form di bawah."}
                         </small>
                     </div>
-                    <label className="btn receipt-upload-btn">
-                        <Camera size={16} />
-                        <span>{scanning ? "Membaca…" : receiptPreviewUrl ? "Ganti Foto" : "Foto Struk"}</span>
+                    <label className="btn sm receipt-upload-btn">
+                        <Camera size={15} />
+                        <span>{scanning ? "Membaca…" : receiptPreviewUrl ? "Ganti" : "Pilih Foto"}</span>
                         <input
                             ref={fileInputRef}
                             type="file"
@@ -398,6 +514,13 @@ export function EntryForm({
                 </div>
             )}
 
+            {savedFlash && (
+                <div className="success">
+                    <CheckCircle2 size={17} />
+                    <span>{savedFlash}</span>
+                </div>
+            )}
+
             {scanInfo && (
                 <div className="success">
                     <CheckCircle2 size={17} />
@@ -405,12 +528,20 @@ export function EntryForm({
                 </div>
             )}
 
+            {/* 1. HERO NOMINAL */}
             <div className={`amount-hero-box ${kind}`}>
                 <div className="amount-hero-top">
                     <span className="amount-hero-label">Nominal {kindLabels[kind]}</span>
                     {numAmount > 0 && (
-                        <button type="button" className="amount-clear-btn" onClick={() => setAmount("")}>
-                            Reset
+                        <button
+                            type="button"
+                            className="amount-clear-btn"
+                            onClick={() => {
+                                setAmount("");
+                                amountInputRef.current?.focus();
+                            }}
+                        >
+                            Hapus
                         </button>
                     )}
                 </div>
@@ -419,6 +550,7 @@ export function EntryForm({
                         {kind === "income" || kind === "refund" ? "+Rp" : kind === "transfer" ? "⇄ Rp" : "−Rp"}
                     </span>
                     <input
+                        ref={amountInputRef}
                         type="text"
                         inputMode="numeric"
                         aria-label="Nominal (Rp)"
@@ -429,19 +561,29 @@ export function EntryForm({
                     />
                 </div>
                 <div className="quick-nominal-row">
-                    {[10000, 25000, 50000, 100000, 500000].map(step => (
+                    {numAmount > 0 && numAmount < 100_000 && (
                         <button
-                            key={step}
                             type="button"
-                            className="nominal-chip"
-                            onClick={() => setAmount(String(numAmount + step))}
+                            className="nominal-chip accent"
+                            title="Kalikan 1.000"
+                            onClick={() => setAmount(String(numAmount * 1000))}
                         >
-                            +{step / 1000}rb
+                            .000
+                        </button>
+                    )}
+                    {[15000, 25000, 50000, 100000, 250000].map(preset => (
+                        <button
+                            key={preset}
+                            type="button"
+                            className={"nominal-chip " + (numAmount === preset ? "active" : "")}
+                            onClick={() => setAmount(String(preset))}
+                        >
+                            {preset / 1000}rb
                         </button>
                     ))}
                 </div>
                 {amountOptions.length > 1 && (
-                    <div className="amount-chips" style={{ marginTop: 8 }}>
+                    <div className="amount-chips" style={{ marginTop: 6 }}>
                         <small>Kandidat total dari struk:</small>
                         <div className="btns">
                             {amountOptions.map(val => (
@@ -459,27 +601,7 @@ export function EntryForm({
                 )}
             </div>
 
-            <div className="form-pair">
-                <Field label="Keterangan / Merchant">
-                    <input
-                        name="description"
-                        value={description}
-                        onChange={e => {
-                            const val = e.target.value;
-                            setDescription(val);
-                            if (!catId && kind === "expense" && val.length >= 3) {
-                                const guessed = inferCategoryClient(val, categories, data.transactions);
-                                if (guessed) setCatId(guessed);
-                            }
-                        }}
-                        placeholder={kind === "transfer" ? "Contoh: Top up GoPay" : "Contoh: Kopi Tuku, Indomaret"}
-                    />
-                </Field>
-                <Field label="Tanggal transaksi">
-                    <input type="date" name="date" value={txDate} onChange={e => setTxDate(e.target.value)} required />
-                </Field>
-            </div>
-
+            {/* 2 & 3. CATEGORY + WALLET */}
             {kind === "transfer" ? (
                 <div className="transfer-box">
                     <div className="transfer-wallets-grid">
@@ -549,20 +671,33 @@ export function EntryForm({
                         </div>
                     </div>
 
-                    <Field label="Biaya admin transfer (Rp, opsional)">
-                        <input
-                            type="text"
-                            inputMode="numeric"
-                            name="fee"
-                            value={formatDots(fee)}
-                            onChange={e => setFee(e.target.value.replace(/\D/g, ""))}
-                            placeholder="0"
-                        />
-                    </Field>
+                    <div className="fee-inline-row">
+                        <Field label="Biaya admin (opsional)">
+                            <input
+                                type="text"
+                                inputMode="numeric"
+                                name="fee"
+                                value={formatDots(fee)}
+                                onChange={e => setFee(e.target.value.replace(/\D/g, ""))}
+                                placeholder="0"
+                            />
+                        </Field>
+                        <div className="quick-nominal-row fee-presets">
+                            {[0, 1000, 2500, 6500].map(f => (
+                                <button
+                                    key={f}
+                                    type="button"
+                                    className={"nominal-chip " + (numFee === f ? "active" : "")}
+                                    onClick={() => setFee(String(f))}
+                                >
+                                    {f === 0 ? "Gratis" : `Rp${formatDots(String(f))}`}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
 
                     {fromAcc && toAcc && numAmount > 0 && (
                         <div className="transfer-sim-card">
-                            <small className="muted">Simulasi saldo setelah transfer:</small>
                             <div className="transfer-sim-row">
                                 <span>
                                     <b>{fromAcc.name}</b>
@@ -586,8 +721,55 @@ export function EntryForm({
                 </div>
             ) : (
                 <>
+                    {kind === "refund" ? (
+                        <Field label="Transaksi pengeluaran asal yang di-refund">
+                            <select
+                                name="original_id"
+                                required
+                                value={originalId}
+                                onChange={e => setOriginalId(e.target.value)}
+                            >
+                                <option value="">Pilih pengeluaran asal…</option>
+                                {expenses.map(t => (
+                                    <option key={t.id} value={t.id}>
+                                        {t.date} · {t.description || "Pengeluaran"} · {money(t.amount)}
+                                    </option>
+                                ))}
+                            </select>
+                        </Field>
+                    ) : (
+                        <CategoryPicker
+                            categories={categories}
+                            transactions={data.transactions}
+                            kind={kind === "income" ? "income" : "expense"}
+                            value={catId}
+                            autoSuggested={autoSuggestedCat && !userPickedCat}
+                            disabled={busy}
+                            onChange={(nextId, manual) => {
+                                setCatId(nextId);
+                                if (manual) {
+                                    setUserPickedCat(!!nextId);
+                                    setAutoSuggestedCat(false);
+                                }
+                            }}
+                            onCategoryCreated={created => {
+                                setCategories(prev => [...prev, created]);
+                                setUserPickedCat(true);
+                                setAutoSuggestedCat(false);
+                            }}
+                            onError={setError}
+                        />
+                    )}
+
                     <div className="field">
-                        <span>Pilih Dompet</span>
+                        <div className="cat-picker-header">
+                            <span>Dompet</span>
+                            {fromAcc && activeAccountAfterBalance !== null && (
+                                <small className="wallet-after-hint">
+                                    Sisa {fromAcc.name}: <b>{money(activeAccountAfterBalance)}</b>
+                                </small>
+                            )}
+                        </div>
                         <div className="wallet-chip-row">
                             {data.accounts.map(a => (
                                 <button
@@ -605,73 +787,55 @@ export function EntryForm({
                             ))}
                         </div>
                     </div>
+                </>
+            )}
 
-                    {kind === "refund" ? (
-                        <Field label="Transaksi pengeluaran asal">
-                            <select
-                                name="original_id"
-                                required
-                                value={originalId}
-                                onChange={e => setOriginalId(e.target.value)}
-                            >
-                                <option value="">Pilih pengeluaran</option>
-                                {expenses.map(t => (
-                                    <option key={t.id} value={t.id}>
-                                        {t.date} · {t.description || "Pengeluaran"} · {money(t.amount)}
-                                    </option>
-                                ))}
-                            </select>
-                        </Field>
-                    ) : (
-                        <div className="field">
-                            <span>Pilih Kategori</span>
-                            <div className="cat-chip-grid">
-                                {cats.map(c => (
-                                    <button
-                                        type="button"
-                                        key={c.id}
-                                        className={`cat-pick-chip ${kind} ${catId === c.id ? "active" : ""}`}
-                                        onClick={() => setCatId(catId === c.id ? "" : c.id)}
-                                    >
-                                        <CatIcon name={c.name} size={15} />
-                                        <span>
-                                            {c.parent_id ? "↳ " : ""}
-                                            {c.name}
-                                        </span>
-                                    </button>
-                                ))}
-                                <button
-                                    type="button"
-                                    className="cat-pick-chip add-new"
-                                    onClick={() => setInline(v => !v)}
-                                >
-                                    <Plus size={15} />
-                                    <span>Kategori baru</span>
-                                </button>
-                            </div>
-                        </div>
-                    )}
+            {/* 4. CATATAN SINGKAT */}
+            <Field label="Catatan singkat / Merchant (opsional)">
+                <input
+                    name="description"
+                    value={description}
+                    onChange={e => {
+                        const val = e.target.value;
+                        setDescription(val);
+                        if (!userPickedCat && (kind === "expense" || kind === "income") && val.trim().length >= 3) {
+                            const guessed = matchCategoryClient(
+                                val,
+                                categories,
+                                data.transactions,
+                                kind === "income" ? "income" : "expense"
+                            );
+                            if (guessed) {
+                                setCatId(guessed);
+                                setAutoSuggestedCat(true);
+                            }
+                        }
+                    }}
+                    placeholder={
+                        kind === "transfer"
+                            ? "Contoh: Top up GoPay"
+                            : kind === "income"
+                              ? "Contoh: Gaji bulanan, Fee proyek"
+                              : "Contoh: Kopi Tuku, Makan siang, Indomaret"
+                    }
+                />
+            </Field>
 
-                    {kind !== "refund" && (
-                        <>
-                            {inline && (
-                                <div className="inline-add">
-                                    <input
-                                        aria-label="Nama kategori baru"
-                                        value={newName}
-                                        onChange={e => setNewName(e.target.value)}
-                                        placeholder="Ketik nama kategori baru…"
-                                    />
-                                    <button
-                                        className="btn primary sm"
-                                        type="button"
-                                        disabled={busy}
-                                        onClick={addCategory}
-                                    >
-                                        Simpan kategori
-                                    </button>
-                                </div>
-                            )}
+            {/* COLLAPSIBLE ADVANCED OPTIONS */}
+            {kind !== "transfer" && kind !== "refund" && (
+                <div className="advanced-toggle-box">
+                    <button
+                        type="button"
+                        className="advanced-toggle-btn"
+                        onClick={() => setShowAdvanced(v => !v)}
+                    >
+                        <SlidersHorizontal size={13} />
+                        <span>Opsi lanjutan (Split kategori{!tx ? " / Refund" : ""})</span>
+                        {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    </button>
+
+                    {showAdvanced && (
+                        <div className="advanced-panel">
                             <label className="check">
                                 <input type="checkbox" checked={split} onChange={e => setSplit(e.target.checked)} />
                                 Bagi nominal ke dua kategori berbeda
@@ -707,17 +871,49 @@ export function EntryForm({
                                     </Field>
                                 </div>
                             )}
-                        </>
+
+                            {!tx && !submitPath && (
+                                <button
+                                    type="button"
+                                    className="btn sm"
+                                    style={{ justifySelf: "start" }}
+                                    onClick={() => {
+                                        setSplit(false);
+                                        setKind("refund");
+                                    }}
+                                >
+                                    <RotateCcw size={13} /> Ubah ke pencatatan Refund pengeluaran
+                                </button>
+                            )}
+                        </div>
                     )}
-                </>
+                </div>
             )}
 
             <ErrorNote message={error} />
 
-            <div className="btns">
-                <button type="submit" disabled={busy || scanning} className="btn primary">
-                    {busy ? "Menyimpan…" : tx ? "Simpan perubahan" : "Simpan transaksi"}
+            {/* STICKY FOOTER SUBMIT */}
+            <div className="entry-sticky-footer">
+                <button type="submit" disabled={busy || scanning} className="btn primary entry-submit-main">
+                    {busy
+                        ? "Menyimpan…"
+                        : tx
+                          ? "Simpan perubahan"
+                          : `Simpan ${kindLabels[kind]}${numAmount > 0 ? ` · ${money(numAmount)}` : ""}`}
                 </button>
+                {!tx && !submitPath && onSavedKeepOpen && (
+                    <button
+                        type="submit"
+                        disabled={busy || scanning}
+                        className="btn"
+                        title="Simpan lalu langsung catat transaksi berikutnya"
+                        onClick={() => {
+                            keepOpenAfterSubmit.current = true;
+                        }}
+                    >
+                        <Plus size={15} /> Simpan &amp; Lagi
+                    </button>
+                )}
                 {tx && !confirmDelete && (
                     <button
                         type="button"
@@ -725,7 +921,7 @@ export function EntryForm({
                         disabled={busy}
                         onClick={() => setConfirmDelete(true)}
                     >
-                        <Trash2 size={15} /> Hapus transaksi
+                        <Trash2 size={15} /> Hapus
                     </button>
                 )}
             </div>

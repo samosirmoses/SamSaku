@@ -115,15 +115,15 @@ web/
 │   └── layout/              # SidebarNav, Topbar, PageHeader, BottomNav, QuickFab, navigation.ts
 └── features/
     ├── auth/                # LoginModal
-    ├── dashboard/           # DashboardView, AccountsSection, CategoriesBreakdown, SpendingLine
-    ├── transactions/        # TransactionsView, EntryForm, TransactionDetailModal
+    ├── dashboard/           # DashboardView (3-zona bersih), AccountsSection, CategoriesBreakdown, SpendingLine
+    ├── transactions/        # TransactionsView, EntryForm (mode cepat), CategoryPicker, TransactionDetailModal
     ├── budgets/             # BudgetsView
     ├── statistics/          # StatisticsView, DonutChart
     ├── reports/             # ReportsView
     ├── importer/            # ImporterView
     ├── masters/             # MastersView, MasterForm, CategoryEdit
-    ├── reviews/             # ReviewsView, ReviewModal
-    └── settings/            # SettingsView
+    ├── reviews/             # ReviewsView, ReviewModal, PendingDraftsBanner (1-click approve)
+    └── settings/            # SettingsView, DangerZone
 ```
 
 ---

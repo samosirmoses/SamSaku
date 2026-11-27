@@ -4,6 +4,17 @@ Seluruh perubahan penting pada arsitektur, fitur, skema database, dan performa d
 
 ---
 
+## [2.3.0] — 2026-11-27 — Perombakan UI/UX Input Cepat, Dashboard 3-Zona, Kalender Stabil & Realtime Instan
+
+### Antarmuka Pengguna & Pengalaman Pemakaian (`web/`)
+- **Form Input Cepat 1-Layar (`EntryForm.tsx` & `CategoryPicker.tsx`):** Menyederhanakan alur pencatatan ke 4 langkah inti (Nominal auto-fokus dengan tombol `.000` & preset → Kategori → Dompet utama terpilih dengan pratinjau sisa saldo → Catatan singkat), bar ringkas tanggal cepat (`Hari ini` / `Kemarin` / pilih tanggal) + tombol Scan Struk AI, menyembunyikan fitur lanjutan (Split kategori & Refund) ke panel lipat, serta menambahkan footer *sticky* dengan tombol **Simpan & Lagi** untuk pencatatan beruntun.
+- **Pemilih Kategori Terkelompok & Anti Salah Tebak (`CategoryPicker.tsx`, `domain.ts`):** Menampilkan 6–7 kategori paling sering dipakai untuk 1-klik cepat, sub-bar otomatis untuk subkategori, serta panel pencarian yang mengelompokkan Induk → Subkategori dan pembuatan kategori baru instan. Memperbaiki `matchCategoryClient` agar tidak lagi memaksa kategori pertama saat teks catatan tidak cocok.
+- **Hierarki Dashboard 3-Zona Bersih (`DashboardView.tsx`, `AccountsSection.tsx`):** Menghapus duplikasi tombol dan elemen analitik bising dari halaman utama; menyusun ulang menjadi (1) banner draf tinjauan + kartu ringkas total saldo & arus kas siklus ini, (2) grid kartu dompet sejajar yang ringkas, serta (3) dua kolom seimbang untuk Transaksi Terakhir dan Pantauan Anggaran / Pos Pengeluaran Terbesar.
+- **Transaksi & Kalender Bebas Reset (`TransactionsView.tsx`, `useLedgerData.ts`):** Memperbaiki bug `setData(null)` saat ganti siklus bulan yang sebelumnya meng-unmount komponen dan mereset tampilan **Kalender** kembali ke **Harian**; kini perpindahan bulan berjalan *in-place* (mempertahankan mode Kalender/Mingguan), menyatukan pemilih `< Bulan >` + tombol `Hari Ini` di toolbar transaksi, dan melipat filter ke laci `Filter` yang rapi.
+- **Sinkronisasi Realtime Instan & Persetujuan Draf 1-Klik (`useLedgerData.ts`, `useRealtimeSync.ts`, `PendingDraftsBanner.tsx`, `ReviewsView.tsx`, `AppChrome.tsx`):** Menambahkan urutan request & *cache-busting* pada *silent refresh*, efek *highlight* visual untuk transaksi/draf yang baru masuk, menu **Tinjauan** dengan badge jumlah antrean *live* di Sidebar/Topbar, tombol `+ Catat` terpusat di tengah navigasi bawah mobile, *toast* interaktif, serta tombol **Simpan 1-Klik** langsung pada draf masuk.
+
+---
+
 ## [2.2.0] — 2026-11-27 — Fitur Reset Data Fleksibel & Wipe Semua Data
 
 ### Fitur & Keamanan Data

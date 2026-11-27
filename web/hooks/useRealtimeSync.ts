@@ -4,6 +4,11 @@ import { getAuthCredentials, wsEndpoint } from "../lib/api";
 
 const VISIBILITY_COOLDOWN_MS = 30_000;
 
+export type RealtimeSyncEvent = {
+    event?: string;
+    message?: string;
+};
+
 export function useRealtimeSync({
     ready,
     authed,
@@ -15,7 +20,7 @@ export function useRealtimeSync({
     authed: boolean;
     demoMode: boolean;
     lastFetchedAt: MutableRefObject<number>;
-    onSync: (message?: string) => void;
+    onSync: (info?: RealtimeSyncEvent) => void;
 }) {
     const [live, setLive] = useState(false);
     const liveRef = useRef(false);
@@ -79,7 +84,8 @@ export function useRealtimeSync({
                     } else if (msg.type === "sync") {
                         const toastMsg =
                             typeof msg.message === "string" && msg.message.trim() ? msg.message.trim() : undefined;
-                        onSyncRef.current(toastMsg);
+                        const evName = typeof msg.event === "string" ? msg.event : undefined;
+                        onSyncRef.current({ event: evName, message: toastMsg });
                     }
                 } catch {}
             };

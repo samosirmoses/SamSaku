@@ -5,9 +5,10 @@ import { BottomNav, PageHeader, QuickFab, SidebarNav, Topbar } from "../componen
 import type { Page } from "../components/layout/navigation";
 import { ErrorNote, Modal } from "../components/ui";
 import { DashboardView } from "../features/dashboard/DashboardView";
+import type { TxViewMode } from "../features/transactions/TransactionsView";
 import { useAuth } from "../hooks/useAuth";
 import { useLedgerData } from "../hooks/useLedgerData";
-import { useRealtimeSync } from "../hooks/useRealtimeSync";
+import { type RealtimeSyncEvent, useRealtimeSync } from "../hooks/useRealtimeSync";
 import { useTheme } from "../hooks/useTheme";
 import {
     type Account,
@@ -79,19 +80,27 @@ type EntryPreset = {
     autoScan?: boolean;
 };
 
+type ToastState = {
+    text: string;
+    actionLabel?: string;
+    onAction?: () => void;
+} | null;
+
 export default function SamSakuApp() {
     const { theme, applyTheme } = useTheme();
     const { authed, demoMode, ready, markConnected, logout } = useAuth();
-    const { month, pickMonth, data, loading, error, setError, refresh, lastFetchedAt } = useLedgerData({
-        ready,
-        demoMode,
-    });
+    const { month, pickMonth, data, loading, refreshing, recentIds, error, setError, refresh, lastFetchedAt } =
+        useLedgerData({
+            ready,
+            demoMode,
+        });
 
     const [page, setPage] = useState<Page>("home");
+    const [txView, setTxViewState] = useState<TxViewMode>("daily");
     const [menuOpen, setMenuOpen] = useState(false);
     const [fabOpen, setFabOpen] = useState(false);
     const [dialog, setDialog] = useState<Dialog>(null);
-    const [notice, setNotice] = useState("");
+    const [toast, setToast] = useState<ToastState>(null);
 
     const [filter, setFilter] = useState("");
     const [accountFilter, setAccountFilter] = useState("");
@@ -103,21 +112,52 @@ export default function SamSakuApp() {
     const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
     const [entryPreset, setEntryPreset] = useState<EntryPreset>({});
 
+    useEffect(() => {
+        try {
+            const saved = sessionStorage.getItem("samsaku-tx-view");
+            if (saved === "daily" || saved === "calendar" || saved === "monthly") {
+                setTxViewState(saved);
+            }
+        } catch {}
+    }, []);
+
+    const setTxView = useCallback((next: TxViewMode) => {
+        setTxViewState(next);
+        try {
+            sessionStorage.setItem("samsaku-tx-view", next);
+        } catch {}
+    }, []);
+
+    const showToast = useCallback((text: string, actionLabel?: string, onAction?: () => void) => {
+        setToast(text ? { text, actionLabel, onAction } : null);
+    }, []);
+
     const handleRealtimeSync = useCallback(
-        (msg?: string) => {
+        (info?: RealtimeSyncEvent) => {
             refresh(true);
-            if (msg) setNotice(msg);
+            const msg = info?.message;
+            const ev = info?.event || "";
+            if (msg) {
+                if (ev === "telegram:new" || ev.startsWith("event:")) {
+                    showToast(msg, "Tinjau →", () => {
+                        setPage("reviews");
+                        setToast(null);
+                    });
+                } else {
+                    showToast(msg);
+                }
+            }
         },
-        [refresh]
+        [refresh, showToast]
     );
 
     const { live } = useRealtimeSync({ ready, authed, demoMode, lastFetchedAt, onSync: handleRealtimeSync });
 
     useEffect(() => {
-        if (!notice) return;
-        const timer = setTimeout(() => setNotice(""), 4000);
+        if (!toast) return;
+        const timer = setTimeout(() => setToast(null), 5000);
         return () => clearTimeout(timer);
-    }, [notice]);
+    }, [toast]);
 
     function nav(nextPage: Page) {
         setPage(nextPage);
@@ -146,14 +186,14 @@ export default function SamSakuApp() {
         setSelectedAccount(null);
         setSelectedCategory(null);
         setSelectedReview(null);
-        refresh();
-        setNotice(message);
+        refresh(true);
+        showToast(message);
     }
 
     async function handleLogout() {
         const errMsg = await logout();
         if (errMsg) {
-            setNotice(errMsg);
+            showToast(errMsg);
             return;
         }
         setSelectedTx(null);
@@ -184,6 +224,7 @@ export default function SamSakuApp() {
     };
 
     const startDay = data?.settings?.monthly_start_day || 1;
+    const reviewCount = data?.reviews?.length || 0;
 
     return (
         <div className="app-shell">
@@ -191,6 +232,7 @@ export default function SamSakuApp() {
                 <SidebarNav
                     page={page}
                     authed={authed}
+                    reviewCount={reviewCount}
                     onNav={nav}
                     onAuthAction={() => (authed ? handleLogout() : setDialog("login"))}
                 />
@@ -202,6 +244,7 @@ export default function SamSakuApp() {
                         <SidebarNav
                             page={page}
                             authed={authed}
+                            reviewCount={reviewCount}
                             onNav={nav}
                             onAuthAction={() => {
                                 setMenuOpen(false);
@@ -220,9 +263,12 @@ export default function SamSakuApp() {
                     ready={ready}
                     demoMode={demoMode}
                     live={live}
+                    refreshing={refreshing}
+                    reviewCount={reviewCount}
                     onOpenMenu={() => setMenuOpen(true)}
                     onToggleTheme={applyTheme}
                     onOpenSettings={() => nav("settings")}
+                    onOpenReviews={() => nav("reviews")}
                     onOpenLogin={() => setDialog("login")}
                 />
 
@@ -232,14 +278,14 @@ export default function SamSakuApp() {
                         month={month}
                         startDay={startDay}
                         onPickMonth={m => pickMonth(m, true)}
-                        onOpenStats={() => nav("stats")}
+                        onScanReceipt={() => openEntry({ kind: "expense", autoScan: true })}
                         onNewEntry={() => openEntry()}
                     />
 
                     {error && (
-                        <div className="card">
+                        <div className="card" style={{ marginBottom: 18 }}>
                             <ErrorNote message={error} />
-                            <div className="btns">
+                            <div className="btns" style={{ marginTop: 10 }}>
                                 <button className="btn" onClick={() => refresh()}>
                                     Coba lagi
                                 </button>
@@ -250,7 +296,7 @@ export default function SamSakuApp() {
                         </div>
                     )}
 
-                    {(!ready || loading) && (
+                    {(!ready || (loading && !data)) && (
                         <div role="status" className="card loading">
                             Memuat data keuangan…
                         </div>
@@ -262,6 +308,7 @@ export default function SamSakuApp() {
                                 <DashboardView
                                     data={data}
                                     month={month}
+                                    highlightIds={recentIds}
                                     onCategory={name => {
                                         nav("transactions");
                                         setFilter(name);
@@ -284,12 +331,20 @@ export default function SamSakuApp() {
                                         setAccountFilter(accId);
                                     }}
                                     onNewTx={() => openEntry({ kind: "expense" })}
-                                    onScanReceipt={() => openEntry({ kind: "expense", autoScan: true })}
                                     onTransfer={fromAccId => openEntry({ kind: "transfer", account_id: fromAccId })}
                                     onBudgets={() => nav("budgets")}
                                     onStats={() => nav("stats")}
                                     onAll={() => nav("transactions")}
+                                    onSelectReview={r => {
+                                        setSelectedReview(r);
+                                        openDialog("review");
+                                    }}
                                     onReview={() => nav("reviews")}
+                                    onReviewResolved={msg => {
+                                        refresh(true);
+                                        showToast(msg);
+                                    }}
+                                    onError={msg => setError(msg)}
                                 />
                             )}
 
@@ -297,6 +352,10 @@ export default function SamSakuApp() {
                                 <TransactionsView
                                     data={data}
                                     month={month}
+                                    view={txView}
+                                    setView={setTxView}
+                                    highlightIds={recentIds}
+                                    onPickMonth={m => pickMonth(m, true)}
                                     filter={filter}
                                     setFilter={setFilter}
                                     accountFilter={accountFilter}
@@ -310,6 +369,16 @@ export default function SamSakuApp() {
                                     onAddAtDate={(date, kind) => openEntry({ date, kind: kind || "expense" })}
                                     onScanAtDate={date => openEntry({ date, kind: "expense", autoScan: true })}
                                     onTransferAtDate={date => openEntry({ date, kind: "transfer" })}
+                                    onSelectReview={r => {
+                                        setSelectedReview(r);
+                                        openDialog("review");
+                                    }}
+                                    onOpenAllReviews={() => nav("reviews")}
+                                    onReviewResolved={msg => {
+                                        refresh(true);
+                                        showToast(msg);
+                                    }}
+                                    onError={msg => setError(msg)}
                                 />
                             )}
 
@@ -322,8 +391,8 @@ export default function SamSakuApp() {
                                         setFilter(catName);
                                     }}
                                     onDone={() => {
-                                        refresh();
-                                        setNotice("Anggaran diperbarui.");
+                                        refresh(true);
+                                        showToast("Anggaran diperbarui.");
                                     }}
                                 />
                             )}
@@ -353,7 +422,7 @@ export default function SamSakuApp() {
                                     data={data}
                                     demoMode={demoMode}
                                     onLogin={() => setDialog("login")}
-                                    onDone={() => refresh()}
+                                    onDone={() => refresh(true)}
                                 />
                             )}
 
@@ -393,18 +462,24 @@ export default function SamSakuApp() {
                                         if (typeof nextStartDay === "number") {
                                             pickMonth(cycleMonthForDate(today(), nextStartDay), false);
                                         }
-                                        refresh();
-                                        setNotice("Pengaturan disimpan.");
+                                        refresh(true);
+                                        showToast("Pengaturan disimpan.");
                                     }}
                                 />
                             )}
 
                             {page === "reviews" && (
                                 <ReviewsView
+                                    data={data}
                                     reviews={data.reviews}
+                                    highlightIds={recentIds}
                                     onSelect={r => {
                                         setSelectedReview(r);
                                         openDialog("review");
+                                    }}
+                                    onResolved={msg => {
+                                        refresh(true);
+                                        showToast(msg);
                                     }}
                                 />
                             )}
@@ -422,11 +497,22 @@ export default function SamSakuApp() {
                 />
             )}
 
-            <BottomNav page={page} onNav={nav} onOpenMenu={() => setMenuOpen(true)} />
+            <BottomNav
+                page={page}
+                reviewCount={reviewCount}
+                onNav={nav}
+                onNewEntry={() => openEntry()}
+                onOpenMenu={() => setMenuOpen(true)}
+            />
 
-            {notice && (
+            {toast && (
                 <div className="toast" role="status">
-                    {notice}
+                    <span>{toast.text}</span>
+                    {toast.actionLabel && toast.onAction && (
+                        <button type="button" className="toast-action-btn" onClick={toast.onAction}>
+                            {toast.actionLabel}
+                        </button>
+                    )}
                 </div>
             )}
 
@@ -460,12 +546,17 @@ export default function SamSakuApp() {
                                         account_id: entryPreset.account_id,
                                     }}
                                     autoScan={entryPreset.autoScan}
-                                    onDone={() => finishMutation()}
+                                    onSavedKeepOpen={() => refresh(true)}
+                                    onDone={() => finishMutation("Transaksi tersimpan.")}
                                 />
                             )}
 
                             {dialog === "edit-entry" && selectedTx && (
-                                <EntryForm data={data} tx={selectedTx} onDone={() => finishMutation()} />
+                                <EntryForm
+                                    data={data}
+                                    tx={selectedTx}
+                                    onDone={() => finishMutation("Perubahan transaksi disimpan.")}
+                                />
                             )}
 
                             {dialog === "account" && (
@@ -508,12 +599,17 @@ export default function SamSakuApp() {
                                     data={data}
                                     initial={{ date: entryPreset.date, kind: "expense" }}
                                     autoScan={true}
-                                    onDone={() => finishMutation()}
+                                    onSavedKeepOpen={() => refresh(true)}
+                                    onDone={() => finishMutation("Transaksi tersimpan.")}
                                 />
                             )}
 
                             {dialog === "review" && selectedReview && (
-                                <ReviewModal r={selectedReview} data={data} done={() => finishMutation()} />
+                                <ReviewModal
+                                    r={selectedReview}
+                                    data={data}
+                                    done={() => finishMutation("Bukti berhasil diproses.")}
+                                />
                             )}
                         </>
                     )}

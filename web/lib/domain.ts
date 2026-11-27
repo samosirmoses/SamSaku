@@ -262,24 +262,30 @@ export function income(t: Transaction): number {
     return t.kind === "income" ? t.amount : 0;
 }
 
-export function inferCategoryClient(text: string, categories: Category[], transactions: Transaction[]): string {
-    const expenseCats = categories.filter(c => c.kind === "expense" && !c.archived);
-    if (!expenseCats.length) return "";
-    const hay = text.toLowerCase();
+export function matchCategoryClient(
+    text: string,
+    categories: Category[],
+    transactions: Transaction[],
+    kind: "expense" | "income" = "expense"
+): string {
+    const activeCats = categories.filter(c => c.kind === kind && !c.archived);
+    if (!activeCats.length) return "";
+    const hay = text.trim().toLowerCase();
+    if (hay.length < 2) return "";
 
     for (const tx of transactions) {
-        if (tx.kind === "expense" && tx.category_id && tx.description) {
-            const d = tx.description.toLowerCase();
-            if ((hay.includes(d) || d.includes(hay)) && expenseCats.some(c => c.id === tx.category_id)) {
+        if (tx.kind === kind && tx.category_id && tx.description) {
+            const d = tx.description.trim().toLowerCase();
+            if (d.length >= 3 && (hay.includes(d) || d.includes(hay)) && activeCats.some(c => c.id === tx.category_id)) {
                 return tx.category_id;
             }
         }
     }
 
-    const rules: [RegExp, RegExp][] = [
+    const expenseRules: [RegExp, RegExp][] = [
         [
-            /makan|minum|kuliner|konsumsi|food|kopi|resto/,
-            /kopi|coffee|cafe|resto|warung|bakso|mie|ayam|nasi|sate|soto|padang|mixue|tuku|starbucks|kfc|mcd|hokben|gofood|grabfood|makan|minum/i,
+            /makan|minum|kuliner|konsumsi|food|kopi|resto|jajan/,
+            /kopi|coffee|cafe|resto|warung|bakso|mie|ayam|nasi|sate|soto|padang|mixue|tuku|kenangan|starbucks|kfc|mcd|hokben|gofood|grabfood|makan|minum|sarapan|lunch|dinner/i,
         ],
         [
             /belanja|kebutuhan|grocer|mart|rumah|pasar|shop/,
@@ -287,19 +293,84 @@ export function inferCategoryClient(text: string, categories: Category[], transa
         ],
         [
             /transport|jalan|kendaraan|bensin|bbm|parkir|tol/,
-            /pertamina|shell|spbu|pertalite|pertamax|bensin|parkir|tol|gojek|goride|gocar|grab|grabbike|grabcar|bluebird|taksi|kereta|mrt|transjakarta/i,
+            /pertamina|shell|spbu|pertalite|pertamax|bensin|parkir|tol|gojek|goride|gocar|grab|grabbike|grabcar|bluebird|taksi|kereta|mrt|krl|transjakarta/i,
         ],
         [
-            /tagih|utilit|listrik|air|internet|pulsa|bill/,
-            /pln|listrik|token|pdam|air|indihome|biznet|wifi|internet|telkomsel|indosat|xl|pulsa|bpjs|netflix|spotify|tagihan/i,
+            /tagih|utilit|listrik|air|internet|pulsa|bill|langganan/,
+            /pln|listrik|token|pdam|air|indihome|biznet|wifi|internet|telkomsel|indosat|xl|pulsa|bpjs|netflix|spotify|youtube|icloud|tagihan/i,
         ],
     ];
 
+    const incomeRules: [RegExp, RegExp][] = [
+        [/gaji|salary|upah|payroll/, /gaji|salary|payroll|upah/i],
+        [/bonus|thr|freelance|proyek|komisi/, /bonus|thr|freelance|project|proyek|komisi|insentif/i],
+        [/invest|bunga|dividen|bagi hasil/, /bunga|dividen|kupon|deposito|reksadana|saham/i],
+    ];
+
+    const rules = kind === "income" ? incomeRules : expenseRules;
     for (const [catRx, textRx] of rules) {
         if (textRx.test(hay)) {
-            const match = expenseCats.find(c => catRx.test(c.name.toLowerCase()));
+            const match = activeCats.find(c => catRx.test(c.name.toLowerCase()));
             if (match) return match.id;
         }
     }
-    return expenseCats[0].id;
+    return "";
+}
+
+export function inferCategoryClient(text: string, categories: Category[], transactions: Transaction[]): string {
+    const expenseCats = categories.filter(c => c.kind === "expense" && !c.archived);
+    if (!expenseCats.length) return "";
+    return matchCategoryClient(text, categories, transactions, "expense") || expenseCats[0].id;
+}
+
+export function frequentCategories(
+    categories: Category[],
+    transactions: Transaction[],
+    kind: "expense" | "income",
+    selectedId?: string,
+    limit = 7
+): Category[] {
+    const active = categories.filter(c => !c.archived && c.kind === kind);
+    if (active.length <= limit) return active;
+
+    const counts = new Map<string, { count: number; lastIdx: number }>();
+    transactions.forEach((tx, idx) => {
+        if (tx.kind !== kind) return;
+        const ids = tx.splits?.length
+            ? tx.splits.filter(s => s.role !== "fee" && s.category_id).map(s => s.category_id as string)
+            : tx.category_id
+              ? [tx.category_id]
+              : [];
+        for (const cid of ids) {
+            const prev = counts.get(cid);
+            if (prev) {
+                prev.count += 1;
+            } else {
+                counts.set(cid, { count: 1, lastIdx: idx });
+            }
+        }
+    });
+
+    const ranked = [...active].sort((a, b) => {
+        const sa = counts.get(a.id);
+        const sb = counts.get(b.id);
+        if (sa && sb) {
+            if (sb.count !== sa.count) return sb.count - sa.count;
+            return sa.lastIdx - sb.lastIdx;
+        }
+        if (sa) return -1;
+        if (sb) return 1;
+        if (!a.parent_id && b.parent_id) return -1;
+        if (a.parent_id && !b.parent_id) return 1;
+        return a.name.localeCompare(b.name, "id");
+    });
+
+    const picked = ranked.slice(0, limit);
+    if (selectedId && !picked.some(c => c.id === selectedId)) {
+        const current = active.find(c => c.id === selectedId);
+        if (current) {
+            return [current, ...picked.slice(0, Math.max(0, limit - 1))];
+        }
+    }
+    return picked;
 }

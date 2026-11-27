@@ -2,8 +2,17 @@
 import { CatIcon } from "../../components/ui";
 import { type Data, money } from "../../lib/domain";
 
-export function CategoriesBreakdown({ data, onSelect }: { data: Data; onSelect: (name: string) => void }) {
-    const cats = data.summary.categories.filter(c => c.amount > 0).sort((a, b) => b.amount - a.amount);
+export function CategoriesBreakdown({
+    data,
+    limit,
+    onSelect,
+}: {
+    data: Data;
+    limit?: number;
+    onSelect: (name: string) => void;
+}) {
+    const allCats = data.summary.categories.filter(c => c.amount > 0).sort((a, b) => b.amount - a.amount);
+    const cats = limit ? allCats.slice(0, limit) : allCats;
     const budgetsByName = new Map((data.budgets || []).map(b => [b.category_name, b]));
 
     return (
