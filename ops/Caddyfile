@@ -1,7 +1,29 @@
+# Stock caddy:2-alpine enforces TLS, security headers, and request body limits at the edge.
+# Per-IP auth-failure and webhook rate limiting is enforced in FastAPI (app/core/rate_limit.py)
+# so no custom xcaddy build is needed on low-RAM VPS hosts.
 {$SAMSAKU_DOMAIN::80} {
     encode zstd gzip
 
+    header {
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=()"
+        -Server
+    }
+
+    handle /v1/webhooks/* {
+        request_body {
+            max_size 1MB
+        }
+        reverse_proxy api:8000
+    }
+
     handle /v1/* {
+        request_body {
+            max_size 8MB
+        }
         reverse_proxy api:8000
     }
 

@@ -1,13 +1,19 @@
 """CSV and memory-isolated WeasyPrint PDF report generation."""
 import csv
+from datetime import date
 import io
 import multiprocessing
 import queue
+import threading
 
 from fastapi import HTTPException
 from jinja2 import Environment
 
 PDF_TIMEOUT_SECONDS = 30
+PDF_LOCK_TIMEOUT_SECONDS = 0.25
+MAX_PDF_SPAN_DAYS = 366
+MAX_PDF_DETAIL_ROWS = 500
+_PDF_SEMAPHORE = threading.BoundedSemaphore(1)
 
 _PDF_TEMPLATE = """<!DOCTYPE html><html lang="id"><meta charset="utf-8"><title>Laporan SamSaku</title>
 <style>
@@ -31,7 +37,9 @@ p{line-height:1.6}small{color:#656962}
 
 
 def safe_cell(value):
-    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
+    if isinstance(value, str) and (
+        value.startswith(("=", "+", "-", "@", "\t", "\r")) or value.lstrip().startswith(("=", "+", "-", "@"))
+    ):
         return "'" + value
     return value
 
@@ -102,24 +110,45 @@ def _pdf_worker(html: str, result_queue) -> None:
 
 
 def report_pdf(report: dict, details: bool) -> bytes:
-    """Render PDF in an isolated spawn subprocess so Pango/Cairo RAM returns to OS immediately."""
-    html = _render_html(report, details)
-    ctx = multiprocessing.get_context("spawn")
-    result_queue = ctx.Queue(maxsize=1)
-    proc = ctx.Process(target=_pdf_worker, args=(html, result_queue), daemon=True)
-    proc.start()
+    """Render PDF in an isolated spawn subprocess with strict concurrency and row bounds."""
+    start = report.get("start")
+    end = report.get("end")
+    if isinstance(start, str):
+        start = date.fromisoformat(start)
+    if isinstance(end, str):
+        end = date.fromisoformat(end)
+    if isinstance(start, date) and isinstance(end, date) and (end - start).days > MAX_PDF_SPAN_DAYS:
+        raise HTTPException(
+            422,
+            f"Rentang tanggal PDF maksimal {MAX_PDF_SPAN_DAYS + 1} hari. Gunakan ekspor CSV untuk rentang lebih panjang.",
+        )
+    if details and len(report.get("transactions", ())) > MAX_PDF_DETAIL_ROWS:
+        raise HTTPException(
+            422,
+            f"Rincian transaksi PDF dibatasi maksimal {MAX_PDF_DETAIL_ROWS} baris. Nonaktifkan rincian atau ekspor CSV.",
+        )
+    if not _PDF_SEMAPHORE.acquire(timeout=PDF_LOCK_TIMEOUT_SECONDS):
+        raise HTTPException(429, "Laporan PDF lain sedang diproses. Tunggu beberapa detik lalu coba lagi.")
     try:
-        status, payload = result_queue.get(timeout=PDF_TIMEOUT_SECONDS)
-    except queue.Empty:
-        proc.terminate()
-        proc.join(timeout=5)
-        raise HTTPException(504, "Pembuatan PDF melebihi batas waktu. Coba rentang tanggal lebih pendek.")
+        html = _render_html(report, details)
+        ctx = multiprocessing.get_context("spawn")
+        result_queue = ctx.Queue(maxsize=1)
+        proc = ctx.Process(target=_pdf_worker, args=(html, result_queue), daemon=True)
+        proc.start()
+        try:
+            status, payload = result_queue.get(timeout=PDF_TIMEOUT_SECONDS)
+        except queue.Empty:
+            proc.terminate()
+            proc.join(timeout=5)
+            raise HTTPException(504, "Pembuatan PDF melebihi batas waktu. Coba rentang tanggal lebih pendek.")
+        finally:
+            proc.join(timeout=5)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2)
+            result_queue.close()
+        if status != "ok":
+            raise HTTPException(503, f"Gagal membuat PDF: {payload}")
+        return payload
     finally:
-        proc.join(timeout=5)
-        if proc.is_alive():
-            proc.kill()
-            proc.join(timeout=2)
-        result_queue.close()
-    if status != "ok":
-        raise HTTPException(503, f"Gagal membuat PDF: {payload}")
-    return payload
+        _PDF_SEMAPHORE.release()

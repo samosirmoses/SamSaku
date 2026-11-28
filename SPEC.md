@@ -31,9 +31,14 @@ SamSaku adalah aplikasi pencatatan keuangan pribadi satu pemilik (*single-owner*
   - Mendukung siklus gajian (misalnya tanggal 25/26). Jika `monthly_start_day >= 15`, nama bulan siklus mengikuti bulan berakhirnya periode (contoh: `26 Sep – 25 Okt 2026` dilabeli Oktober 2026).
 - **Awal pekan (`weekly_start_day` 0–6):** Mengatur hari pertama pada tampilan kalender transaksi, rekap mingguan, dan grafik pola harian.
 - **Dompet utama (`default_account_id`):** Dipilih otomatis saat mencatat transaksi baru maupun memproses foto struk dari Telegram.
-- **Anggaran bulanan per kategori (`budgets`):**
+- **Anggaran bulanan per kategori (`budgets`) & Cycle Pacing:**
   - Ditetapkan pada kategori pengeluaran. Jika anggaran dipasang pada kategori induk, realisasi otomatis menjumlahkan pengeluaran kategori induk beserta seluruh subkategorinya.
-  - Status otomatis: `safe` (<80%), `warning` (80%–100%), `over` (>100%), lengkap dengan perhitungan batas belanja aman per hari (*safe daily allowance*).
+  - Status otomatis menggunakan aritmetika integer eksak: `safe` (`spent * 5 < amount * 4`), `warning` (`80%–100%`), `over` (`>100%`), lengkap dengan perhitungan *cycle pacing* (`% anggaran terpakai` vs `% waktu siklus berjalan`), *safe daily allowance* (mengacu sisa anggaran, atau cadangan arus kas bersih bila anggaran belum dibuat), dan peringatan proaktif (`budget_alerts`) di Dashboard, Anggaran, dan balasan Telegram.
+- **Perbandingan kategori lintas siklus (`category_deltas`):**
+  - Menghitung perubahan pengeluaran bersih per kategori antara siklus aktif dan siklus sebelumnya dalam batch query yang sama tanpa query N+1.
+- **Idempotensi & konsistensi replay:**
+  - `POST /v1/transactions` mendukung header `Idempotency-Key` (sebagai cadangan `source_ref`) dan menekan siaran WebSocket ganda pada retry identik.
+  - Replay dengan payload berbeda pada `/v1/transactions`, `/v1/reviews/{key}/resolve`, `/v1/imports/{job_id}/commit`, dan `/v1/receipts/{job_id}/confirm` ditolak dengan `409 Conflict`.
 
 ---
 
@@ -42,7 +47,10 @@ SamSaku adalah aplikasi pencatatan keuangan pribadi satu pemilik (*single-owner*
 - **Konektor bukti (`bca`, `gopay`, `telegram`):**
   - Gmail Apps Script (`connectors/gmail/`) meneruskan bukti email BCA ke `POST /v1/events/bca`.
   - APK Android (`android/`) meneruskan notifikasi GoPay/Gojek ke `POST /v1/events/gopay`.
-  - Bot Telegram (`POST /v1/webhooks/telegram` atau long-polling) menerima catatan teks singkat (`kopi 35k tunai`) dan foto struk dengan tombol konfirmasi inline (`Simpan` / `Batalkan`).
+  - Bot Telegram (`POST /v1/webhooks/telegram` atau long-polling jika `SAMSAKU_TELEGRAM_POLL=1` tanpa webhook HTTPS) langsung menyimpan otomatis (*instant auto-save*) catatan teks (`kopi 35k`, `gaji 8jt bca`) maupun foto struk/bukti transfer ketika nominal dan dompet jelas (fallback ke `default_account_id` untuk non-transfer) serta bebas kandidat duplikat.
+  - Balasan Telegram langsung menampilkan ringkasan transaksi, **sisa anggaran kategori** (bila beranggaran), dan **saldo dompet terbaru**, disertai tombol inline 1-klik (`Ganti Kategori`, `Ganti Dompet`, `Hapus`). Bukti ambigu, dompet belum jelas, atau kandidat duplikat masuk ke antrean **Perlu ditinjau** (`/v1/reviews`) dengan alasan eksplisit.
+  - Mendukung rekap harian opsional pukul **21:00 WIB (`Asia/Jakarta`)** yang idempoten (maksimal 1x/hari) saat `SAMSAKU_TELEGRAM_DAILY_RECAP=1`.
+  - Deteksi duplikat ketat lintas kanal menolak pengulangan `update_id` Telegram, pengulangan `digest` SHA-256 foto struk, `source_ref` penyedia yang sama, serta kandidat transaksi sama-hari/nominal/dompet.
   - Data sensitif (nomor rekening/kartu, OTP, PIN, password) disamarkan otomatis sebelum disimpan (`redact`).
   - Pencatatan otomatis memerlukan template parser terverifikasi (`verified: true`), referensi penyedia, dan tanggal valid; bukti ambigu masuk antrean **Perlu ditinjau** (`/v1/reviews`).
 - **Scan struk & bukti transfer berbasis Gemini Vision AI:**
@@ -55,38 +63,43 @@ SamSaku adalah aplikasi pencatatan keuangan pribadi satu pemilik (*single-owner*
     - Nomor rekening mentah disamarkan (`****7890`) di `source_events` dan tampil tersamarkan (`•••• 7890`) di kartu dompet PWA.
   - OCR lokal Tesseract **sengaja tidak dipasang** agar ukuran Docker image kecil dan VPS murah aman dari lonjakan RAM.
 - **Impor Excel (`.xlsx`):**
-  - Menyediakan template unduhan untuk `masters` dan `transactions`, pemetaan kolom fleksibel (dapat disimpan ulang), pratinjau tanpa mengubah buku kas (savepoint rollback), deteksi duplikat & transaksi mirip, serta publikasi atomik setelah persetujuan pemilik.
+  - Menyediakan template unduhan untuk `masters` dan `transactions`, pemetaan kolom fleksibel (dapat disimpan ulang), pratinjau tanpa mengubah buku kas (savepoint rollback), deteksi duplikat & transaksi mirip (termasuk *fingerprint* isi baris untuk baris tanpa referensi agar edit 1 sel tetap menjaga deduplikasi baris lain, serta pencocokan refund lintas dompet via `original_ref`), pembatasan dekompresi stream ZIP anti *zip-bomb*, publikasi atomik dalam satu transaksi database, dan pembersihan objek `FILE_STORAGE_BUCKET` saat `reset_owner_data`.
 - **Alokasi pos & target (`schemes`, `goals`, `reserves`):**
-  - Tersedia di API `/v1/schemes` & `/v1/goals` untuk mencadangkan pemasukan bebas ke pos tetap (`fixed`), persentase (`percent`), atau sisa (`remainder`) tanpa membuat mutasi saldo bank.
+  - Tersedia di API `/v1/schemes` & `/v1/goals` (serta `DELETE /v1/goals/{key}` yang melepas `Reserve.goal_id = NULL` secara aman) dan panel UI **Target & Amplop Tabungan** (`GoalsPanel`) di halaman **Anggaran** untuk mencadangkan pemasukan bebas ke pos tetap (`fixed`), persentase (`percent`), atau sisa (`remainder`) tanpa membuat mutasi saldo bank.
 
 ---
 
 ## 4. Antarmuka Pengguna (PWA) & Sinkronisasi Realtime
 
 - **Halaman utama PWA:**
-  1. **Ringkasan (`home`):** Hierarki 3-zona bersih: (1) banner draf tinjauan aktif (dengan **Simpan 1-Klik**) + kartu ringkasan total saldo seluruh dompet, batas aman belanja harian, dan 3 KPI arus kas siklus aktif, (2) deretan kartu dompet visual sejajar, serta (3) dua kolom seimbang berisi Transaksi Terakhir dan Pantauan Anggaran / Pos Pengeluaran Terbesar.
-  2. **Input Cepat (`EntryForm` & `CategoryPicker`):** Mode cepat 1-layar dengan nominal besar auto-fokus (preset & pengali `.000`), tanggal cepat (`Hari ini` / `Kemarin` / pilih tanggal) + tombol ringkas Scan Struk AI, pemilih kategori pintar (chip kategori paling sering dipakai + panel pencarian & grup hirarki Induk → Subkategori), dompet utama terpilih otomatis dengan estimasi sisa saldo, catatan singkat dengan saran kategori non-intrusif, opsi lanjutan terlipat (Split kategori & Refund), serta footer *sticky* dengan tombol **Simpan & Lagi** untuk input beruntun. Di layar mobile, tombol utama `+ Catat` berada tepat di tengah navigasi bawah.
-  3. **Transaksi (`transactions`):** 3 mode tampilan (**Harian**, **Kalender**, **Mingguan**) yang menyatu dengan pemilih siklus (`< Bulan >` + `Hari Ini`) tanpa mereset mode tampilan saat berpindah bulan, dilengkapi pencarian cepat, laci filter terlipat (Dompet, Jenis, Kategori) dengan chip indikator aktif, serta rekap 1 baris.
-  4. **Anggaran (`budgets`):** Total anggaran vs terpakai, *safe daily allowance*, daftar progres per kategori, dan daftar kategori belum beranggaran.
-  5. **Statistik (`stats`):** Grafik donat interaktif (pengeluaran & pemasukan), perbandingan siklus lalu, pola pengeluaran per hari dalam sepekan, grafik arus kas harian/mingguan, anggaran vs realisasi, dan distribusi saldo dompet.
+  1. **Ringkasan (`home`):** Hierarki 3-zona bersih: (1) banner draf tinjauan aktif (dengan **Simpan 1-Klik**) + banner peringatan anggaran proaktif 80%/100% + kartu ringkasan total saldo seluruh dompet, *safe daily allowance* beserta *pacing* siklus, dan 3 KPI arus kas siklus aktif, (2) deretan kartu dompet visual sejajar, serta (3) dua kolom seimbang berisi Transaksi Terakhir dan Pantauan Anggaran / Pos Pengeluaran Terbesar.
+  2. **Input Cepat (`EntryForm` & submodul terfokus):** Dimodularisasi (`EntryHeaderControls`, `EntryAmountBox`, `EntryStandardFields`, `EntryTransferFields`, `EntryAdvancedSection`, `EntryFormFooter`, `entryPayload`, `useReceiptAutoFill`, masing-masing `< 400` baris); mode cepat 1-layar dengan nominal besar auto-fokus (preset & pengali `.000`), tanggal cepat (`Hari ini` / `Kemarin` / pilih tanggal) + tombol ringkas Scan Struk AI, `CategoryPicker` pintar, dompet utama terpilih otomatis dengan estimasi sisa saldo, catatan singkat dengan saran kategori non-intrusif, opsi lanjutan terlipat (Split kategori & Refund), serta footer *sticky* dengan tombol **Simpan & Lagi** untuk input beruntun. Di layar mobile, tombol utama `+ Catat` berada tepat di tengah navigasi bawah.
+  3. **Transaksi (`transactions`):** 3 mode tampilan (**Harian**, **Kalender**, **Mingguan**) yang menyatu dengan pemilih siklus (`< Bulan >` + `Hari Ini`) tanpa mereset mode tampilan saat berpindah bulan maupun saat terjadi *silent refresh*, dilengkapi pencarian cepat, laci filter terlipat (Dompet, Jenis termasuk Refund, Kategori) dengan chip indikator aktif, serta rekap 1 baris. Total pengeluaran di Kalender dan Grafik Statistik menghitung nilai bersih termasuk refund dan biaya admin transfer agar konsisten dengan `summary.expense`.
+  4. **Anggaran (`budgets`):** Total anggaran vs terpakai, bilah perbandingan *pacing* siklus (`% terpakai` vs `% waktu siklus`), banner peringatan proaktif 80%/100%, *safe daily allowance*, daftar progres per kategori, panel **Target & Amplop Tabungan** (`GoalsPanel`), dan daftar kategori belum beranggaran.
+  5. **Statistik (`stats`):** Grafik donat interaktif (pengeluaran & pemasukan), perbandingan siklus lalu beserta perubahan kategori terbesar (`category_deltas`), pola pengeluaran per hari dalam sepekan, grafik arus kas harian/mingguan, anggaran vs realisasi, dan distribusi saldo dompet.
   6. **Tinjauan (`reviews`):** Dapat diakses langsung dari Sidebar & Topbar dengan badge jumlah antrean *live*; mendukung **Simpan 1-Klik**, ubah/tautkan ke transaksi yang ada, atau abaikan bukti.
-  7. **Laporan (`reports`):** Pratinjau laporan periode siklus atau rentang tanggal khusus, unduh **CSV** dan **PDF** (dirender di server lewat subprocess WeasyPrint terisolasi).
+  7. **Laporan (`reports`):** Pratinjau laporan periode siklus atau rentang tanggal khusus, unduh **CSV** (baik server maupun ekspor klien pada mode Sandbox menetralisir payload *formula injection* `=`, `+`, `-`, `@`, `\t`, `\r` lewat `web/lib/csv.ts`) dan **PDF** (dirender di server lewat subprocess WeasyPrint terisolasi dengan batas konkurensi & rentang/baris).
   8. **Impor Excel (`import`):** Alur unggah → pemetaan kolom → pratinjau dampak → terapkan.
   9. **Master data (`masters`):** Kelola dompet, kategori (induk/subkategori/arsip), dan status aktivitas konektor otomatis.
-  10. **Pengaturan (`settings`):** Tema Terang/Gelap (*Light/Dark Mode*), siklus bulanan, awal pekan, dompet utama, reset data Sandbox, serta **Zona Bahaya** untuk **Reset Data fleksibel** (pilih transaksi/mutasi, antrean bukti & riwayat impor, nol-kan saldo awal dompet, dan/atau anggaran bulanan dengan konfirmasi ketik `RESET`) maupun **Wipe Semua Data** (kosong total dengan konfirmasi ketik `WIPE SEMUA`) via `POST /v1/data/reset`.
-- **Mode Sandbox Interaktif:** Saat belum login ke server, pengguna dapat menjelajahi seluruh fitur dengan data contoh di `localStorage` (kode `demo.ts` di-load dinamis hanya saat belum login).
-- **Sinkronisasi Realtime (`WS /v1/ws`):** Mutasi dari perangkat lain, Telegram, Gmail, atau Android langsung mengirim event `sync` ke browser aktif untuk melakukan *silent refresh* *in-place* (bebas kedip, anti-stale cache) lengkap dengan efek *highlight* pada item baru dan notifikasi *toast* interaktif.
+  10. **Pengaturan (`settings`):** Tema Terang/Gelap (*Light/Dark Mode*), siklus bulanan, awal pekan, dompet utama, reset data Sandbox, serta **Zona Bahaya** untuk **Reset Data fleksibel** maupun **Wipe Semua Data** via `POST /v1/data/reset`.
+- **Mode Sandbox Interaktif:** Saat belum login ke server, pengguna dapat menjelajahi seluruh fitur (termasuk Target Tabungan & *pacing*) dengan data contoh di `localStorage` (kode `demo.ts` di-load dinamis hanya saat belum login).
+- **Sinkronisasi Realtime (`WS /v1/ws`) & Cache Service Worker (`sw.js`):**
+  - Mutasi dari perangkat lain, Telegram, Gmail, atau Android langsung mengirim event `sync` ke browser aktif untuk melakukan *silent refresh* *in-place* tanpa mereset tampilan Kalender atau filter aktif.
+  - Koneksi WebSocket membatasi maksimum koneksi per pemilik & global serta memvalidasi `Origin` saat `CORS_ORIGINS` eksplisit, memakai *jittered exponential backoff* di klien, dan otomatis menjalankan rekonsiliasi `/v1/bootstrap` saat tersambung ulang maupun saat peramban kembali `online`.
+  - Service Worker (`samsaku-public-v2`) langsung mengambil alih kontrol klien (`skipWaiting` / `clients.claim`), menghapus cache lama, dan memakai strategi *network-first* untuk navigasi HTML agar bundle statis terbaru selalu tersaji pasca deploy VPS.
 
 ---
 
 ## 5. Keamanan & Arsitektur VPS Murah
 
-- **Autentikasi:** Mendukung Supabase JWT (verifikasi JWKS asimetris `ES256`/`RS256` dikunci ke `OWNER_ID`) maupun token self-hosted (`SAMSAKU_DEV_TOKEN`) saat dijalankan mandiri di VPS tanpa Supabase.
-- **Isolasi Data:** Seluruh tabel PostgreSQL mengaktifkan Row Level Security (RLS) dan mencabut akses role publik (`PUBLIC`, `anon`, `authenticated`).
+- **Autentikasi & CORS:** Mendukung Supabase JWT (`ES256`/`RS256` dikunci ke `OWNER_ID`) maupun token self-hosted (`SAMSAKU_DEV_TOKEN`). Di `SAMSAKU_ENV=production`, `CORS_ORIGINS` wajib diisi secara eksplisit tanpa wildcard `*`.
+- **Pertahanan Edge (`ops/Caddyfile` & `rate_limit.py`):**
+  - Caddy menambahkan security headers (`Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`) serta batas ukuran body (`1MB` untuk webhook, `8MB` untuk endpoint `/v1/*`).
+  - FastAPI menegakkan rate limit in-memory berbatas memori per IP (`429` + `Retry-After`) pada webhook/intake (`SAMSAKU_RATE_LIMIT_WEBHOOK_PER_MIN`) dan lonjakan kegagalan autentikasi (`SAMSAKU_RATE_LIMIT_AUTH_FAIL_PER_MIN`).
+- **Isolasi Data & Pemulihan Cadangan:** Seluruh tabel PostgreSQL mengaktifkan RLS dan mencabut akses `PUBLIC`, `anon`, serta `authenticated`; `ops/backup.py restore` otomatis menjalankan ulang `REVOKE_PRIVILEGES_SQL` pasca `pg_restore --no-privileges`.
 - **Target Efisiensi VPS (512 MB – 2 GB RAM):**
   - 3 container produksi (`db`, `api`, `caddy`) tanpa container Nginx terpisah.
-  - 1 request `GET /v1/bootstrap` saat membuka/refresh aplikasi (menggantikan 7 request sebelumnya).
-  - Query batch O(1) tanpa N+1, composite database indexes, dan subprocess terisolasi untuk render PDF WeasyPrint.
+  - 1 request `GET /v1/bootstrap` saat membuka/refresh aplikasi, query batch O(1), composite database indexes, serta PDF WeasyPrint di subprocess `spawn` terisolasi yang dijaga semaphore tunggal (`_PDF_SEMAPHORE`), batas rentang 367 hari, dan batas 500 baris rincian.
 
 ---
 

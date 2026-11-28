@@ -2,25 +2,20 @@
 from datetime import date
 from typing import Literal
 
-import httpx
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.routing import APIRoute
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.auth import configured_owner, owner, secret_matches
-from ..core.db import get_db, lock_owner
+from ..core.db import get_db
 from ..core.realtime import notify as realtime_notify
-from ..models import Evidence, FileJob, Transaction
 from ..schemas import Commit, ConfirmReceipt, Preview
 from ..services import imports
-from ..services.common import owned
-from ..services.jobs import get_job, load_file, now, purge_file, store_file
-from ..services.ocr import create_receipt, process_receipt, scan_receipt_auto
+from ..services.jobs import store_file, tick_pending_jobs
+from ..services.ocr import confirm_receipt_job, create_receipt, process_receipt, scan_receipt_auto
 from ..services.reports import csv_bytes, report_csv, report_pdf
 from ..services.summary import summary as build_summary
-from ..services.transactions import post_transaction
-from ..services.xlsx import WorkbookError, scan
+from ..services.xlsx import WorkbookError
 
 
 class WorkbookRoute(APIRoute):
@@ -60,14 +55,6 @@ def read_upload(file: UploadFile) -> bytes:
     return content
 
 
-def cleanup(db: Session, job: FileJob) -> None:
-    try:
-        purge_file(job)
-        db.commit()
-    except (httpx.HTTPError, RuntimeError):
-        db.rollback()
-
-
 @router.get("/imports/template")
 def download_template(kind: Kind, _=Depends(owner)):
     return attachment(imports.template(kind), f"SamSaku_{kind}.xlsx", XLSX)
@@ -85,143 +72,37 @@ def upload(file: UploadFile = File(), kind: Kind = Form(), user=Depends(owner), 
     return {"id": job.id, "kind": kind, "sheets": sheets}
 
 
-def import_job(db: Session, user: str, job_id: str, lock: bool = False) -> FileJob:
-    job = get_job(db, user, job_id, lock=lock)
-    if job.kind not in ("transactions", "masters"):
-        raise HTTPException(404, "Impor tidak ditemukan.")
-    return job
-
-
 @router.get("/imports")
 def history(user=Depends(owner), db: Session = Depends(get_db)):
-    query = (
-        select(FileJob.id, FileJob.filename, FileJob.kind, FileJob.status, FileJob.created_at)
-        .where(FileJob.owner_id == user, FileJob.kind.in_(["transactions", "masters"]))
-        .order_by(FileJob.created_at.desc())
-        .limit(100)
-    )
-    return [dict(row) for row in db.execute(query).mappings()]
+    return imports.list_import_history(db, user)
 
 
 @router.get("/imports/mappings")
 def mappings(user=Depends(owner), db: Session = Depends(get_db)):
-    recent = db.execute(
-        select(FileJob.config)
-        .where(FileJob.owner_id == user, FileJob.config.is_not(None))
-        .order_by(FileJob.created_at.desc())
-        .limit(200)
-    )
-    seen = {}
-    for (config,) in recent:
-        if config.get("mapping_name"):
-            seen.setdefault(
-                config["mapping_name"],
-                {"mapping_name": config["mapping_name"], "sheets": config["sheets"]},
-            )
-    return list(seen.values())
+    return imports.list_import_mappings(db, user)
 
 
 @router.post("/imports/{job_id}/preview")
 def preview(job_id: str, body: Preview, user=Depends(owner), db: Session = Depends(get_db)):
-    lock_owner(db, user)
-    job = import_job(db, user, job_id, True)
-    if job.status in ("done", "approved"):
-        raise HTTPException(409, "Batch ini sudah disetujui.")
-    plans = [s.model_dump() for s in body.sheets]
-    if len({p["name"] for p in plans}) != len(plans):
-        raise HTTPException(422, "Setiap sheet hanya boleh dipilih sekali.")
-    if any((p["entity"] == "transactions") != (job.kind == "transactions") for p in plans):
-        raise HTTPException(422, "Jenis sheet harus sesuai dengan jenis impor.")
-    result = imports.evaluate(db, user, job, plans)
-    job.config = body.model_dump()
-    job.result = result
-    job.status = "preview"
-    db.commit()
-    return result
+    return imports.preview_import(db, user, job_id, body)
 
 
 @router.post("/imports/{job_id}/commit")
 def commit(job_id: str, body: Commit, user=Depends(owner), db: Session = Depends(get_db)):
-    lock_owner(db, user)
-    job = import_job(db, user, job_id, True)
-    if job.status == "done":
-        return job.result
-    if job.status == "approved":
-        return publish_approved(db, user, job_id)
-    if job.status != "preview" or job.result.get("revision") != body.revision:
-        raise HTTPException(409, "Buat pratinjau terbaru sebelum menyimpan.")
-    excluded = {(r.sheet, r.row) for r in body.exclude}
-    accepted = {(r.sheet, r.row) for r in body.accept_similar}
-    for row in job.result["rows"]:
-        key = (row["sheet"], row["row"])
-        if key not in excluded and (row["status"] == "error" or (row["status"] == "similar" and key not in accepted)):
-            raise HTTPException(409, "Selesaikan baris yang perlu ditinjau.")
-    job.config = {**job.config, "approval": body.model_dump()}
-    job.status = "approved"
-    db.commit()
-    return publish_approved(db, user, job_id)
-
-
-def publish_approved(db: Session, user: str, job_id: str) -> dict:
-    lock_owner(db, user)
-    job = import_job(db, user, job_id, True)
-    if job.status == "done":
-        return job.result
-    if job.status != "approved":
-        raise HTTPException(409, "Impor memerlukan persetujuan.")
-    approval = Commit.model_validate(job.config["approval"])
-    plans = job.config["sheets"]
-    try:
-        parsed_rows = scan(load_file(job), plans)
-        if imports.evaluate(db, user, job, plans, preloaded_rows=parsed_rows)["revision"] != approval.revision:
-            raise HTTPException(409, "Data berubah sejak ditinjau. Segarkan pratinjau.")
-        result = imports.evaluate(
-            db,
-            user,
-            job,
-            plans,
-            apply=True,
-            excluded={(r.sheet, r.row) for r in approval.exclude},
-            accepted={(r.sheet, r.row) for r in approval.accept_similar},
-            preloaded_rows=parsed_rows,
-        )
-    except (HTTPException, WorkbookError):
-        job.status = "preview"
-        job.config = {k: v for k, v in job.config.items() if k != "approval"}
-        db.commit()
-        raise
-    counts = result["counts"]
-    final = {
-        "status": "done",
-        "id": job.id,
-        "counts": counts,
-        "applied": sum(counts.get(k, 0) for k in ("new", "similar", "update")),
-        "skipped": counts.get("duplicate", 0) + counts.get("excluded", 0),
-    }
-    job.result = final
-    job.status = "done"
-    db.commit()
-    cleanup(db, job)
-    realtime_notify(user, "import:done", "Impor Excel selesai.")
-    return final
+    result, changed = imports.commit_import(db, user, job_id, body)
+    if changed:
+        realtime_notify(user, "import:done", "Impor Excel selesai.")
+    return result
 
 
 @router.get("/imports/{job_id}/errors")
 def errors(job_id: str, user=Depends(owner), db: Session = Depends(get_db)):
-    job = import_job(db, user, job_id)
-    rows = [["Sheet", "Baris", "Status", "Alasan"]]
-    rows.extend(
-        [r["sheet"], r["row"], r["status"], r["message"]]
-        for r in (job.result or {}).get("rows", [])
-        if r["status"] in ("error", "similar")
-    )
-    return attachment(csv_bytes(rows), "SamSaku_tinjauan.csv", "text/csv")
+    return attachment(csv_bytes(imports.import_errors_rows(db, user, job_id)), "SamSaku_tinjauan.csv", "text/csv")
 
 
 @router.get("/imports/{job_id}")
 def batch_status(job_id: str, user=Depends(owner), db: Session = Depends(get_db)):
-    job = import_job(db, user, job_id)
-    return {"id": job.id, "status": job.status, "config": job.config, "result": job.result}
+    return imports.get_import_status(db, user, job_id)
 
 
 @router.get("/reports/{format}")
@@ -256,78 +137,19 @@ def upload_receipt(file: UploadFile = File(), user=Depends(owner), db: Session =
 
 @router.post("/receipts/{job_id}/process")
 def recognize(job_id: str, user=Depends(owner), db: Session = Depends(get_db)):
-    lock_owner(db, user)
     return process_receipt(db, user, job_id)
 
 
 @router.post("/receipts/{job_id}/confirm")
 def confirm_receipt(job_id: str, body: ConfirmReceipt, user=Depends(owner), db: Session = Depends(get_db)):
-    lock_owner(db, user)
-    job = get_job(db, user, job_id, lock=True)
-    if job.kind != "receipt":
-        raise HTTPException(404, "Struk tidak ditemukan.")
-    if job.status == "done":
-        return job.result
-    if job.status != "review" or bool(body.transaction) == bool(body.transaction_id):
-        raise HTTPException(422, "Tautkan ke satu transaksi atau isi draf baru.")
-    evidence = owned(db, Evidence, user, job.result["evidence_id"])
-    if evidence.transaction_id:
-        tx = owned(db, Transaction, user, evidence.transaction_id)
-    elif evidence.status != "review":
-        raise HTTPException(409, "Bukti sudah diselesaikan.")
-    elif body.transaction:
-        tx = post_transaction(db, user, body.transaction, source="receipt", source_ref=job.id)
-    else:
-        tx = owned(db, Transaction, user, body.transaction_id)
-    evidence.transaction_id, evidence.status = tx.id, "linked"
-    job.result = {**job.result, "transaction_id": tx.id}
-    job.status = "done"
-    db.commit()
-    realtime_notify(user, "receipt:confirm")
-    return job.result
+    result, changed = confirm_receipt_job(db, user, job_id, body)
+    if changed:
+        realtime_notify(user, "receipt:confirm")
+    return result
 
 
 @router.post("/jobs/tick")
 def process_pending(x_job_token: str = Header(""), db: Session = Depends(get_db)):
     if not secret_matches(x_job_token, "JOB_RUNNER_TOKEN"):
         raise HTTPException(403, "Pemicu tidak diizinkan.")
-    user = configured_owner()
-    lock_owner(db, user)
-    old = db.scalar(
-        select(FileJob)
-        .where(
-            FileJob.owner_id == user,
-            (FileJob.data.is_not(None) | FileJob.object_key.is_not(None)),
-            ((FileJob.expires_at <= now()) | FileJob.status.in_(["done", "review"])),
-        )
-        .order_by(FileJob.created_at)
-        .limit(1)
-        .with_for_update()
-    )
-    if old:
-        if old.expires_at <= now() and old.status in ("preview", "uploaded", "approved"):
-            old.status, old.result = "expired", None
-        cleanup(db, old)
-    pending = db.scalar(
-        select(FileJob.id)
-        .where(FileJob.owner_id == user, FileJob.status == "approved", FileJob.expires_at > now())
-        .order_by(FileJob.created_at)
-        .limit(1)
-    )
-    if pending:
-        return publish_approved(db, user, pending)
-    job = db.scalar(
-        select(FileJob)
-        .where(
-            FileJob.owner_id == user,
-            FileJob.kind == "receipt",
-            FileJob.status == "uploaded",
-            FileJob.expires_at > now(),
-        )
-        .order_by(FileJob.created_at)
-        .limit(1)
-    )
-    if job:
-        result = process_receipt(db, user, job.id)
-        return {"status": result["status"], "id": job.id}
-    return {"status": "idle"}
+    return tick_pending_jobs(db, configured_owner())

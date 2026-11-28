@@ -1,14 +1,28 @@
 import {
     compactMoney,
     formatDots,
+    formatSignedDots,
     fullDate,
+    generateUUID,
     money,
     monthLabel,
     parseDigits,
+    parseSignedDigits,
     shortDate,
 } from "./format";
 
-export { compactMoney, formatDots, fullDate, money, monthLabel, parseDigits, shortDate };
+export {
+    compactMoney,
+    formatDots,
+    formatSignedDots,
+    fullDate,
+    generateUUID,
+    money,
+    monthLabel,
+    parseDigits,
+    parseSignedDigits,
+    shortDate,
+};
 
 export type Account = {
     id: string;
@@ -93,6 +107,37 @@ export type Budget = {
     status: "safe" | "warning" | "over";
 };
 
+export type Goal = {
+    id: string;
+    name: string;
+    target: number;
+    reserved: number;
+    target_date?: string | null;
+};
+
+export type CyclePacing = {
+    as_of?: string;
+    days_total: number;
+    days_elapsed: number;
+    days_remaining: number;
+    elapsed_percent: number;
+    total_budget: number;
+    total_budget_spent: number;
+    budget_remaining: number;
+    budget_spent_percent: number;
+    safe_daily_allowance: number;
+    allowance_basis: "budget" | "income" | "none";
+    pacing_status: "on_track" | "ahead" | "over" | "no_budget";
+};
+
+export type CategoryDelta = {
+    name: string;
+    current: number;
+    previous: number;
+    delta: number;
+    percent_change: number;
+};
+
 export type Settings = {
     monthly_start_day: number;
     weekly_start_day: number;
@@ -114,6 +159,9 @@ export type Summary = {
         amount: number;
     }[];
     budgets?: Budget[];
+    budget_alerts?: Budget[];
+    pacing?: CyclePacing;
+    category_deltas?: CategoryDelta[];
     previous?: {
         start: string;
         end: string;
@@ -134,6 +182,7 @@ export type Data = {
     transactions: Transaction[];
     reviews: Review[];
     budgets: Budget[];
+    goals?: Goal[];
     settings: Settings;
     summary: Summary;
     connections?: {

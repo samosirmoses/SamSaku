@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { CyclePickerControl } from "../../components/layout/AppChrome";
 import { TxList } from "../../components/ui";
+import { aggregateCalendarByDate } from "../../lib/charts";
 import {
     type Data,
     type Review,
@@ -143,17 +144,7 @@ export function TransactionsView({
         const startMs = new Date(range.start + "T12:00:00").getTime();
         const endMs = new Date(range.end + "T12:00:00").getTime();
         const totalDays = Math.max(1, Math.round((endMs - startMs) / 86400000) + 1);
-        const byDate = new Map<string, { inc: number; exp: number; items: Transaction[] }>();
-        let maxDailyExp = 1;
-        for (const t of filteredRows) {
-            const d = t.date.slice(0, 10);
-            const cur = byDate.get(d) || { inc: 0, exp: 0, items: [] };
-            cur.inc += income(t);
-            cur.exp += Math.max(0, expense(t));
-            if (cur.exp > maxDailyExp) maxDailyExp = cur.exp;
-            cur.items.push(t);
-            byDate.set(d, cur);
-        }
+        const { byDate, maxDailyExp } = aggregateCalendarByDate(filteredRows);
 
         const firstDow = new Date(startMs).getDay();
         const leadingBlanks = (firstDow - weekStart + 7) % 7;
@@ -377,7 +368,7 @@ export function TransactionsView({
                             <div className="filter-drawer-group">
                                 <small className="filter-drawer-label">Jenis Transaksi</small>
                                 <div className="quick-filter-pills wrap">
-                                    {(["", "expense", "income", "transfer"] as const).map(k => (
+                                    {(["", "expense", "income", "transfer", "refund"] as const).map(k => (
                                         <button
                                             type="button"
                                             key={k || "all"}
@@ -428,7 +419,10 @@ export function TransactionsView({
                     </span>
                     <span className="summary-dot">·</span>
                     <span>
-                        Keluar <strong className="expense-amt">−{money(filteredExpense)}</strong>
+                        Keluar{" "}
+                        <strong className={filteredExpense < 0 ? "income" : "expense-amt"}>
+                            {filteredExpense < 0 ? `+${money(Math.abs(filteredExpense))}` : `−${money(filteredExpense)}`}
+                        </strong>
                     </span>
                     <span className="summary-dot">·</span>
                     <span>
@@ -455,8 +449,16 @@ export function TransactionsView({
                                         {group.inc > 0 && (
                                             <span className="daily-pill income">+{money(group.inc)}</span>
                                         )}
-                                        {group.exp > 0 && (
-                                            <span className="daily-pill expense-amt">−{money(group.exp)}</span>
+                                        {group.exp !== 0 && (
+                                            <span
+                                                className={
+                                                    "daily-pill " + (group.exp < 0 ? "income" : "expense-amt")
+                                                }
+                                            >
+                                                {group.exp < 0
+                                                    ? `+${money(Math.abs(group.exp))}`
+                                                    : `−${money(group.exp)}`}
+                                            </span>
                                         )}
                                         <button
                                             type="button"
@@ -534,8 +536,12 @@ export function TransactionsView({
                                             {cell.inc > 0 && (
                                                 <small className="cal-inc">+{compactMoney(cell.inc)}</small>
                                             )}
-                                            {cell.exp > 0 && (
-                                                <small className="cal-exp">−{compactMoney(cell.exp)}</small>
+                                            {cell.exp !== 0 && (
+                                                <small className={cell.exp < 0 ? "cal-inc" : "cal-exp"}>
+                                                    {cell.exp < 0
+                                                        ? `+${compactMoney(Math.abs(cell.exp))}`
+                                                        : `−${compactMoney(cell.exp)}`}
+                                                </small>
                                             )}
                                         </span>
                                     </button>
@@ -552,9 +558,22 @@ export function TransactionsView({
                                 <h2>{fullDate(activeCalendarDate)}</h2>
                                 <small className="muted">
                                     Masuk: <b className="income">+{money(selectedDayStat.inc)}</b> · Keluar:{" "}
-                                    <b className="expense-amt">−{money(selectedDayStat.exp)}</b>
+                                    <b className={selectedDayStat.exp < 0 ? "income" : "expense-amt"}>
+                                        {selectedDayStat.exp < 0
+                                            ? `+${money(Math.abs(selectedDayStat.exp))}`
+                                            : `−${money(selectedDayStat.exp)}`}
+                                    </b>
                                 </small>
                             </div>
+                            {today() >= range.start && today() <= range.end && activeCalendarDate !== today() && (
+                                <button
+                                    type="button"
+                                    className="btn sm"
+                                    onClick={() => setSelectedDate(today())}
+                                >
+                                    Hari ini
+                                </button>
+                            )}
                         </div>
                         <div className="btns" style={{ marginBottom: 14 }}>
                             <button
@@ -630,7 +649,9 @@ export function TransactionsView({
                                     </button>
                                     <div className="daily-header-right">
                                         <span className="daily-pill income">+{money(w.inc)}</span>
-                                        <span className="daily-pill expense-amt">−{money(w.exp)}</span>
+                                        <span className={"daily-pill " + (w.exp < 0 ? "income" : "expense-amt")}>
+                                            {w.exp < 0 ? `+${money(Math.abs(w.exp))}` : `−${money(w.exp)}`}
+                                        </span>
                                         <span className={"daily-pill " + (net >= 0 ? "income" : "expense-amt")}>
                                             Net {net > 0 ? "+" : ""}
                                             {money(net)}

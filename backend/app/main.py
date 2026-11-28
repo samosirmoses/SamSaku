@@ -10,6 +10,13 @@ from sqlalchemy.exc import IntegrityError
 
 from .core.config import cors_origins
 from .core.http_client import close_http_client
+from .core.rate_limit import (
+    auth_fail_limiter,
+    auth_fail_rate_limit,
+    client_ip,
+    webhook_limiter,
+    webhook_rate_limit,
+)
 from .core.realtime import hub as realtime_hub, router as realtime_router
 from .routers import (
     accounts_router,
@@ -48,10 +55,35 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def private_cache(request, call_next):
+async def enforce_rate_limits(request, call_next):
+    path = request.url.path
+    if not path.startswith("/v1/"):
+        return await call_next(request)
+
+    ip = client_ip(request)
+    is_webhook_or_intake = path == "/v1/webhooks/telegram" or path.startswith("/v1/intake/")
+    if is_webhook_or_intake:
+        limited, retry_after = webhook_limiter.hit(ip, webhook_rate_limit())
+        if limited:
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+                content={"detail": "Terlalu banyak permintaan webhook/intake. Coba lagi sebentar."},
+            )
+    else:
+        auth_limit = auth_fail_rate_limit()
+        limited, retry_after = auth_fail_limiter.is_limited(ip, auth_limit)
+        if limited:
+            return JSONResponse(
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+                content={"detail": "Terlalu banyak percobaan gagal. Tunggu satu menit lalu coba lagi."},
+            )
+
     response = await call_next(request)
-    if request.url.path.startswith("/v1/"):
-        response.headers["Cache-Control"] = "private, no-store"
+    if not is_webhook_or_intake and response.status_code in (401, 403):
+        auth_fail_limiter.hit(ip, auth_fail_rate_limit())
+    response.headers["Cache-Control"] = "private, no-store"
     return response
 
 

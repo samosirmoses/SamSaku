@@ -15,6 +15,7 @@ from ..models import Account, Category, Evidence, Transaction
 from ..schemas import EventIn, TransactionIn
 from .calculations import rupiah
 from .receipt_text import _extract_date, infer_category
+from .settings import get_settings
 from .transactions import post_transaction
 
 _rules_cache: tuple[str, float, list[dict]] | None = None
@@ -52,47 +53,96 @@ def draft(db: Session, owner_id: str, source: str, text: str, event_date) -> tup
     accounts = db.scalars(select(Account).where(Account.owner_id == owner_id)).all()
     if source == "telegram":
         amounts = re.findall(r"(?<!\w)(?:rp\s*)?\d[\d.]*(?:,00)?(?:rb|jt|k)?(?!\w)", text.lower())
-        account = next((a for a in accounts if a.name.lower() in text.lower() or a.code.lower() in text.lower()), None)
-        kind = "income" if re.search(r"\b(gaji|bonus|pemasukan)\b", text, re.I) else "expense"
-        cat_id = None
-        if kind == "expense":
-            cats = [
-                {"id": c.id, "name": c.name, "kind": c.kind, "archived": c.archived}
-                for c in db.scalars(select(Category).where(Category.owner_id == owner_id)).all()
-            ]
-            cat_id, _ = infer_category(cats, [], text, text)
+        account = None
+        for acc in sorted(accounts, key=lambda a: max(len(a.name), len(a.code)), reverse=True):
+            for token in (acc.name, acc.code):
+                if token and re.search(rf"(?<!\w){re.escape(token)}(?!\w)", text, re.I):
+                    account = acc
+                    break
+            if account:
+                break
+        if account is None:
+            account = next((a for a in accounts if a.name.lower() in text.lower() or a.code.lower() in text.lower()), None)
+        account_guessed = False
+        if account is None:
+            default_id = get_settings(db, owner_id).get("default_account_id")
+            if default_id:
+                account = next((a for a in accounts if a.id == default_id), None)
+                account_guessed = account is not None
+        kind = "income" if re.search(r"\b(gaji|bonus|pemasukan|thr|dividen|komisi)\b", text, re.I) else "expense"
+        cats = [
+            {"id": c.id, "name": c.name, "kind": c.kind, "archived": c.archived}
+            for c in db.scalars(select(Category).where(Category.owner_id == owner_id)).all()
+        ]
+        recent_tx = [
+            {"description": t.description, "category_id": t.category_id}
+            for t in db.scalars(
+                select(Transaction)
+                .where(Transaction.owner_id == owner_id, Transaction.kind == kind, Transaction.category_id.is_not(None))
+                .order_by(Transaction.date.desc(), Transaction.created_at.desc())
+                .limit(100)
+            ).all()
+        ]
+        cat_id, cat_name = infer_category(cats, recent_tx, text, text, kind=kind)
         payload = {
             "date": event_date.isoformat(),
             "description": text[:500],
             "kind": kind,
             "account_id": account.id if account else None,
+            "account_guessed": account_guessed,
             "amount": rupiah(amounts[0]) if len(amounts) == 1 else None,
         }
         if cat_id:
             payload["category_id"] = cat_id
+            payload["category_name"] = cat_name
         return payload, False
 
     rules = _load_parser_rules()
     if not rules:
         return {}, False
 
+    stripped = text.strip()
     for rule in rules:
         if rule.get("source") != source:
             continue
-        matched = re.fullmatch(rule["pattern"], text.strip(), flags=re.IGNORECASE | re.DOTALL)
-        if not matched:
-            continue
-        groups = matched.groupdict()
+        if "fields" in rule:
+            requires = rule.get("require") or []
+            if any(not re.search(req, stripped, flags=re.IGNORECASE | re.MULTILINE) for req in requires):
+                continue
+            groups: dict[str, str] = {}
+            failed = False
+            for field_name, field_pattern in rule["fields"].items():
+                m = re.search(field_pattern, stripped, flags=re.IGNORECASE | re.MULTILINE)
+                if not m:
+                    failed = True
+                    break
+                if field_name in m.groupdict():
+                    groups[field_name] = m.group(field_name)
+                elif m.lastindex:
+                    groups[field_name] = m.group(1)
+                else:
+                    groups[field_name] = m.group(0)
+            if failed:
+                continue
+        else:
+            matched = re.fullmatch(rule["pattern"], stripped, flags=re.IGNORECASE | re.DOTALL)
+            if not matched:
+                continue
+            groups = matched.groupdict()
         amount = rupiah(groups.get("amount") or "")
         account = next((a for a in accounts if a.code == rule["account_code"]), None)
         ref = (groups.get("ref") or "").strip()[:480]
         parsed_date = None
         if groups.get("date"):
+            formats = list(rule.get("date_formats") or [])
             if rule.get("date_format"):
+                formats.append(rule["date_format"])
+            for fmt in formats:
                 try:
-                    parsed_date = datetime.strptime(groups["date"].strip(), rule["date_format"]).date()
+                    parsed_date = datetime.strptime(groups["date"].strip(), fmt).date()
+                    break
                 except ValueError:
-                    pass
+                    continue
             if parsed_date is None:
                 iso_date = _extract_date(groups["date"])
                 if iso_date:
@@ -129,7 +179,7 @@ def draft(db: Session, owner_id: str, source: str, text: str, event_date) -> tup
     return {}, False
 
 
-def ingest(db: Session, owner_id: str, source: str, data: EventIn) -> Evidence:
+def ingest_with_status(db: Session, owner_id: str, source: str, data: EventIn) -> tuple[Evidence, bool]:
     lock_owner(db, owner_id)
     raw = data.text.strip()
     digest = hashlib.sha256(raw.encode()).hexdigest()
@@ -142,7 +192,7 @@ def ingest(db: Session, owner_id: str, source: str, data: EventIn) -> Evidence:
     ).all()
     for item in existing:
         if item.digest == digest:
-            return item
+            return item, False
     when = data.occurred_at or datetime.now(timezone.utc)
     if when.tzinfo is None:
         when = when.replace(tzinfo=JAKARTA)
@@ -191,4 +241,8 @@ def ingest(db: Session, owner_id: str, source: str, data: EventIn) -> Evidence:
                 tx = post_transaction(db, owner_id, TransactionIn.model_validate(parsed), source, ref)
                 event.transaction_id, event.status = tx.id, "posted"
     db.flush()
-    return event
+    return event, True
+
+
+def ingest(db: Session, owner_id: str, source: str, data: EventIn) -> Evidence:
+    return ingest_with_status(db, owner_id, source, data)[0]

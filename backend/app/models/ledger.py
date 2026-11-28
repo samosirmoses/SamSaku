@@ -5,6 +5,7 @@ from uuid import uuid4
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -47,7 +48,11 @@ class Account(Owned, Base):
 
 class Category(Owned, Base):
     __tablename__ = "categories"
-    __table_args__ = (UniqueConstraint("owner_id", "code"),)
+    __table_args__ = (
+        UniqueConstraint("owner_id", "code"),
+        CheckConstraint("kind IN ('income', 'expense')", name="ck_categories_kind_valid"),
+        CheckConstraint("parent_id IS NULL OR parent_id <> id", name="ck_categories_no_self_parent"),
+    )
     code: Mapped[str] = mapped_column(String(80))
     name: Mapped[str] = mapped_column(String(160))
     kind: Mapped[str] = mapped_column(String(12))
@@ -77,6 +82,13 @@ class Transaction(Owned, Base):
         Index("ix_transactions_owner_account", "owner_id", "account_id"),
         Index("ix_transactions_owner_to_account", "owner_id", "to_account_id"),
         Index("ix_transactions_original_id", "original_id"),
+        CheckConstraint("amount > 0", name="ck_transactions_amount_positive"),
+        CheckConstraint("fee >= 0", name="ck_transactions_fee_nonnegative"),
+        CheckConstraint("kind IN ('income', 'expense', 'transfer', 'refund')", name="ck_transactions_kind_valid"),
+        CheckConstraint(
+            "kind <> 'transfer' OR (to_account_id IS NOT NULL AND account_id <> to_account_id)",
+            name="ck_transactions_transfer_accounts",
+        ),
     )
     date: Mapped[CalendarDate] = mapped_column(Date, index=True)
     kind: Mapped[str] = mapped_column(String(16))
@@ -128,6 +140,7 @@ class Evidence(Owned, Base):
 
 class Goal(Owned, Base):
     __tablename__ = "goals"
+    __table_args__ = (CheckConstraint("target > 0", name="ck_goals_target_positive"),)
     name: Mapped[str] = mapped_column(String(160))
     target: Mapped[int] = mapped_column(BigInteger)
 
@@ -153,7 +166,11 @@ class Allocation(Owned, Base):
 
 class Reserve(Owned, Base):
     __tablename__ = "reserves"
-    __table_args__ = (Index("ix_reserves_owner_account", "owner_id", "account_id"),)
+    __table_args__ = (
+        Index("ix_reserves_owner_account", "owner_id", "account_id"),
+        CheckConstraint("amount > 0", name="ck_reserves_amount_positive"),
+        CheckConstraint("remaining >= 0 AND remaining <= amount", name="ck_reserves_remaining_bounds"),
+    )
     application_id: Mapped[str] = mapped_column(ForeignKey("scheme_applications.id"))
     scheme_id: Mapped[str] = mapped_column(ForeignKey("schemes.id"))
     income_id: Mapped[str] = mapped_column(ForeignKey("transactions.id"), index=True)
@@ -184,6 +201,9 @@ class UserSettings(Owned, Base):
 
 class Budget(Owned, Base):
     __tablename__ = "budgets"
-    __table_args__ = (UniqueConstraint("owner_id", "category_id"),)
+    __table_args__ = (
+        UniqueConstraint("owner_id", "category_id"),
+        CheckConstraint("amount > 0", name="ck_budgets_amount_positive"),
+    )
     category_id: Mapped[str] = mapped_column(ForeignKey("categories.id"), index=True)
     amount: Mapped[int] = mapped_column(BigInteger)

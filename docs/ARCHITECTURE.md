@@ -40,13 +40,14 @@ Backend menerapkan arsitektur berlapis (*layered architecture*) agar setiap file
 
 ```text
 backend/app/
-├── main.py                  # Bootstrap FastAPI, lifespan, GZip, CORS, registrasi router
+├── main.py                  # Bootstrap FastAPI, lifespan, GZip, CORS, rate-limit middleware, router
 ├── core/
-│   ├── config.py            # Konstanta timezone Asia/Jakarta & pembacaan env
+│   ├── config.py            # Konstanta timezone Asia/Jakarta, CORS produksi wajib eksplisit & pembacaan env
 │   ├── db.py                # Engine SQLAlchemy (pool 4+2), SessionLocal, lock_owner
 │   ├── auth.py              # Verifikasi Supabase JWKS JWT & SAMSAKU_DEV_TOKEN
+│   ├── rate_limit.py        # SlidingWindowLimiter per IP berbatas memori untuk webhook & kegagalan auth
 │   ├── http_client.py       # Shared pooled httpx.Client untuk integrasi eksternal
-│   └── realtime.py          # WebSocket hub (/v1/ws) untuk push event sync
+│   └── realtime.py          # WebSocket hub (/v1/ws) dengan batas koneksi per pemilik/global & cek Origin
 ├── models/
 │   ├── ledger.py            # 14 model buku kas (SQLAlchemy 2.0 Mapped style)
 │   └── jobs.py              # FileJob & ImportEntry (SQLAlchemy 2.0 Mapped style)
@@ -57,30 +58,33 @@ backend/app/
 │   ├── common.py            # Helper fail(), owned(), rows(), columns()
 │   ├── calculations.py      # Aturan rupiah(), cycle(), divide()
 │   ├── settings.py          # Pengaturan siklus & helper tanggal periode
+│   ├── bootstrap.py         # Assembly GET /v1/bootstrap (1 request, zero advisory lock)
 │   ├── accounts.py          # Batch balance/reserves/tx_count (3 query total, anti N+1) & CRUD
 │   ├── categories.py        # CRUD kategori & validasi hirarki 2 tingkat
-│   ├── transactions.py      # Posting double-entry, refund, batch serialize_transactions
-│   ├── summary.py           # Summary & budgets dengan SQL SUM/GROUP BY (tanpa lock_owner)
-│   ├── planning.py          # Skema alokasi pos & target tabungan (batch query)
+│   ├── transactions.py      # Posting double-entry, refund, idempotensi, batch serialize_transactions
+│   ├── summary.py           # Summary, pacing siklus, category_deltas & budgets dengan SQL SUM/GROUP BY (tanpa lock_owner)
+│   ├── planning.py          # Skema alokasi pos & target tabungan (CRUD + batch query)
+│   ├── reviews.py           # Antrean tinjauan, status konektor, dan resolusi idempoten
+│   ├── telegram.py          # Bridge webhook Telegram, state machine tombol inline, dan long-polling
 │   ├── intake.py            # Redaksi PII, cache parser-rules JSON, ingest bukti
-│   ├── imports.py           # Evaluasi savepoint & publikasi atomik workbook Excel
-│   ├── jobs.py              # Penyimpanan file sementara (DB lokal / Supabase Storage)
+│   ├── imports.py           # Evaluasi savepoint, riwayat impor, & publikasi atomik workbook Excel
+│   ├── jobs.py              # Penyimpanan file sementara (DB lokal / Supabase Storage) & tick job
 │   ├── ocr.py               # Scan struk & bukti transfer Gemini Vision only (tanpa Tesseract lokal)
 │   ├── receipt_matching.py  # Pencocokan nomor rekening/VA (suffix match), klasifikasi transfer/income/expense & redaksi PII
 │   ├── receipt_text.py      # Ekstraksi tanggal & inferensi kategori (pengeluaran/pemasukan) berbasis berita/aturan/riwayat
-│   ├── reports.py           # CSV & render PDF WeasyPrint di subprocess spawn terisolasi
+│   ├── reports.py           # CSV & render PDF WeasyPrint di subprocess spawn terisolasi + semaphore tunggal & batas rentang/baris
 │   └── xlsx.py              # Parser/generator workbook openpyxl yang aman
 └── routers/
-    ├── bootstrap.py         # GET /v1/bootstrap (1 request untuk seluruh dashboard)
-    ├── accounts.py          # /v1/accounts
-    ├── categories.py        # /v1/categories
-    ├── transactions.py      # /v1/transactions
-    ├── budgets.py           # /v1/budgets & /v1/settings
-    ├── summary.py           # /v1/summary
-    ├── reviews.py           # /v1/reviews, /v1/connections, /v1/events/{source}
-    ├── planning.py          # /v1/goals & /v1/schemes
-    ├── tools.py             # /v1/imports/*, /v1/receipts/*, /v1/reports/*, /v1/jobs/tick
-    └── telegram.py          # /v1/webhooks/telegram & long-polling bridge
+    ├── bootstrap.py         # Thin route GET /v1/bootstrap
+    ├── accounts.py          # Thin routes /v1/accounts
+    ├── categories.py        # Thin routes /v1/categories
+    ├── transactions.py      # Thin routes /v1/transactions
+    ├── budgets.py           # Thin routes /v1/budgets, /v1/settings & /v1/data/reset
+    ├── summary.py           # Thin route /v1/summary
+    ├── reviews.py           # Thin routes /v1/reviews, /v1/connections, /v1/events/{source}
+    ├── planning.py          # Thin routes /v1/goals & /v1/schemes
+    ├── tools.py             # Thin routes /v1/imports/*, /v1/receipts/*, /v1/reports/*, /v1/jobs/tick
+    └── telegram.py          # Thin route /v1/webhooks/telegram
 ```
 
 ---
@@ -93,32 +97,34 @@ Frontend dipecah dari file monolitik menjadi modul per fitur, custom hooks, komp
 web/
 ├── app/
 │   ├── layout.tsx           # Metadata PWA & font DM Sans saja
-│   ├── page.tsx             # Shell utama ringkas + dynamic import halaman/modal
+│   ├── page.tsx             # Shell utama ringkas (< 320 baris) pengatur state global & navigasi
 │   └── globals.css          # Entry import 4 file CSS modular
 ├── styles/
 │   ├── tokens.css           # Variabel warna tema terang/gelap & tipografi
 │   ├── base.css             # Reset, layout shell, sidebar, topbar, bottom-nav
 │   ├── components.css       # Card, button, modal, form, chip, tx-list
-│   └── pages.css            # Dashboard, kalender, statistik, anggaran, laporan, impor, FAB, responsive
+│   └── pages.css            # Dashboard, kalender, statistik, anggaran, pacing, alert banner, laporan, impor, FAB
 ├── lib/
 │   ├── api.ts               # HTTP client + lazy dynamic import ./demo hanya saat sandbox
-│   ├── domain.ts            # Tipe data & logika periode/filter/inferensi kategori
-│   ├── format.ts            # Formatter Rupiah & tanggal terpusat (tanpa duplikasi)
+│   ├── charts.ts            # Agregasi harian/mingguan/kalender & partisi DonutChart bebas refund clamp
+│   ├── csv.ts               # Sanitasi sel formula injection CSV klien (identik dengan safe_cell backend)
+│   ├── domain.ts            # Tipe data (termasuk Goal, CyclePacing, CategoryDelta) & logika periode/filter
+│   ├── format.ts            # Formatter Rupiah, input bertanda, UUID fallback & tanggal terpusat
 │   └── demo.ts              # Sandbox interaktif di localStorage (hanya dimuat jika belum login)
 ├── hooks/
 │   ├── useAuth.ts           # Status login Supabase / dev token + registrasi service worker
 │   ├── useTheme.ts          # Persistensi tema terang/gelap
-│   ├── useLedgerData.ts     # Pemuatan 1x via GET /v1/bootstrap & silent refresh
-│   └── useRealtimeSync.ts   # WebSocket reconnect/ping + cooldown visibilitychange (30 detik)
+│   ├── useLedgerData.ts     # Pemuatan 1x via GET /v1/bootstrap & silent refresh in-place
+│   └── useRealtimeSync.ts   # Jittered backoff WebSocket, rekonsiliasi reconnect/online & cooldown 30 detik
 ├── components/
 │   ├── ui/                  # Modal, Field, ErrorNote, CatIcon, WalletIcon, TxList
-│   └── layout/              # SidebarNav, Topbar, PageHeader, BottomNav, QuickFab, navigation.ts
+│   └── layout/              # SidebarNav, Topbar, PageHeader, PageContent, AppDialogs, BottomNav, QuickFab
 └── features/
     ├── auth/                # LoginModal
-    ├── dashboard/           # DashboardView (3-zona bersih), AccountsSection, CategoriesBreakdown, SpendingLine
-    ├── transactions/        # TransactionsView, EntryForm (mode cepat), CategoryPicker, TransactionDetailModal
-    ├── budgets/             # BudgetsView
-    ├── statistics/          # StatisticsView, DonutChart
+    ├── dashboard/           # DashboardView (alert anggaran, pacing strip, 3-zona), AccountsSection, CategoriesBreakdown
+    ├── transactions/        # TransactionsView, EntryForm & submodul (HeaderControls, AmountBox, StandardFields, TransferFields, AdvancedSection, FormFooter, entryPayload, useReceiptAutoFill), CategoryPicker, TransactionDetailModal
+    ├── budgets/             # BudgetsView, GoalsPanel (target & amplop tabungan)
+    ├── statistics/          # StatisticsView (termasuk category_deltas), DonutChart
     ├── reports/             # ReportsView
     ├── importer/            # ImporterView
     ├── masters/             # MastersView, MasterForm, CategoryEdit

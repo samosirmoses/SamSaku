@@ -66,11 +66,23 @@ def safe_value(value):
     return value
 
 
+MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+MAX_ZIP_ENTRIES = 512
+
+
 def workbook(data: bytes):
     try:
         with ZipFile(BytesIO(data)) as archive:
-            if sum(i.file_size for i in archive.infolist()) > 32 * 1024 * 1024:
+            infos = archive.infolist()
+            if len(infos) > MAX_ZIP_ENTRIES or sum(i.file_size for i in infos) > MAX_UNCOMPRESSED_BYTES:
                 raise ValueError("Workbook terlalu besar setelah dibuka.")
+            actual_bytes = 0
+            for info in infos:
+                with archive.open(info, "r") as stream:
+                    while chunk := stream.read(65536):
+                        actual_bytes += len(chunk)
+                        if actual_bytes > MAX_UNCOMPRESSED_BYTES:
+                            raise ValueError("Workbook terlalu besar setelah dibuka.")
         book = load_workbook(BytesIO(data), read_only=True, data_only=True, keep_links=False)
     except (BadZipFile, KeyError, OSError, ValueError, ParseError) as err:
         raise WorkbookError("Workbook XLSX tidak valid atau terlalu besar.") from err
@@ -131,10 +143,15 @@ def money(value, signed: bool = False) -> int:
     if isinstance(value, bool) or value is None:
         raise ValueError("Nominal wajib berupa rupiah bulat.")
     if isinstance(value, str):
-        s = re.sub(r"(?i)^rp\.?\s*", "", value).strip().replace(" ", "")
-        if not re.fullmatch(r"-?(?:\d+|\d{1,3}(?:\.\d{3})+)(?:,\d+)?", s):
+        s = re.sub(r"(?i)^(?:rp\.?|idr)\s*", "", value).strip().replace(" ", "")
+        if re.fullmatch(r"-?\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?", s):
+            value = s.replace(",", "")
+        elif re.fullmatch(r"-?(?:\d+|\d{1,3}(?:\.\d{3})+)(?:,\d{1,2})?", s):
+            value = s.replace(".", "").replace(",", ".")
+        elif re.fullmatch(r"-?\d+\.\d{1,2}", s):
+            value = s
+        else:
             raise ValueError("Format nominal tidak dikenali. Gunakan angka atau format Indonesia.")
-        value = s.replace(".", "").replace(",", ".")
     try:
         number = Decimal(str(value))
         if not number.is_finite() or abs(number) > 9_000_000_000_000_000:

@@ -1,7 +1,7 @@
-"""Transaction routes with batched serialization."""
+"""Transaction routes with batched serialization and Idempotency-Key support."""
 from datetime import date
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from ..core.auth import owner
@@ -10,7 +10,7 @@ from ..core.realtime import notify as realtime_notify
 from ..schemas import TransactionIn
 from ..services.transactions import (
     delete_transaction,
-    post_transaction,
+    post_transaction_with_status,
     serialize_transactions,
     transaction_dict,
     transactions,
@@ -32,10 +32,19 @@ def list_tx(
 
 
 @router.post("/transactions", status_code=201)
-def add_tx(data: TransactionIn, db: Session = Depends(get_db), user: str = Depends(owner)):
-    tx = post_transaction(db, user, data)
+def add_tx(
+    data: TransactionIn,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    user: str = Depends(owner),
+):
+    header_ref = idempotency_key.strip() if idempotency_key and idempotency_key.strip() else None
+    if header_ref and len(header_ref) > 512:
+        raise HTTPException(422, "Idempotency-Key maksimal 512 karakter.")
+    tx, created = post_transaction_with_status(db, user, data, source_ref=data.source_ref or header_ref)
     db.commit()
-    realtime_notify(user, "transaction:created")
+    if created:
+        realtime_notify(user, "transaction:created")
     return transaction_dict(db, tx)
 
 

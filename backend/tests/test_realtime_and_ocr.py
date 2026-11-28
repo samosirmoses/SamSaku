@@ -437,30 +437,22 @@ def test_telegram_photo_bca_transfer_end_to_end(monkeypatch):
                 res = client.post("/v1/webhooks/telegram", headers=wh_headers, json=photo_update)
                 assert res.status_code == 200, res.text
                 body = res.json()
+                assert "✓ Tercatat" in body["text"]
                 assert "⇄ Transfer Rp500.000 (+admin Rp1.000)" in body["text"]
                 assert "myBCA → GoPay" in body["text"]
-                save_btn = body["reply_markup"]["inline_keyboard"][0][0]
-                assert save_btn["text"] == "Simpan"
+                assert "Saldo myBCA: Rp1.499.000 · GoPay: Rp600.000" in body["text"]
+                row_btns = body["reply_markup"]["inline_keyboard"][0]
+                assert [b["text"] for b in row_btns] == ["Ganti Dompet", "Hapus"]
 
-            # Verify raw account numbers are masked in source_events
+            # Verify raw account numbers are masked in source_events and transaction is posted
             with Session(test_engine) as db:
                 ev = db.scalar(select(Evidence).where(Evidence.source == "receipt"))
                 assert ev is not None
+                assert ev.status == "posted"
                 assert ev.parsed["source_account_masked"] == "****7890"
                 assert ev.parsed["target_account_masked"] == "****7890"
                 assert "1234567890" not in str(ev.parsed)
 
-            # Click Simpan and verify double-entry transfer balances
-            cb = {
-                "callback_query": {
-                    "id": "cb-1",
-                    "from": {"id": 99},
-                    "message": {"message_id": 77, "chat": {"id": 99, "type": "private"}},
-                    "data": save_btn["callback_data"],
-                }
-            }
-            confirm_res = client.post("/v1/webhooks/telegram", headers=wh_headers, json=cb)
-            assert confirm_res.status_code == 200
             accs = {a["id"]: a["balance"] for a in client.get("/v1/accounts", headers=headers).json()}
             assert accs[bca["id"]] == 2000000 - 501000
             assert accs[gp["id"]] == 100000 + 500000

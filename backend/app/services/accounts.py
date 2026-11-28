@@ -1,5 +1,6 @@
 """Account balance calculation (batched), active reserves, and account CRUD."""
 from datetime import date
+from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select, update
@@ -17,7 +18,7 @@ from ..models import (
     Transaction,
     UserSettings,
 )
-from ..schemas import AccountEdit
+from ..schemas import AccountEdit, AccountIn
 from .common import columns, fail, owned, rows
 
 
@@ -37,7 +38,7 @@ def balance(db: Session, account: Account, as_of: date | None = None) -> int | N
     )
     if as_of:
         query = query.where(Transaction.date <= as_of)
-    return account.opening_balance + int(db.scalar(query) or 0)
+    return (account.opening_balance or 0) + int(db.scalar(query) or 0)
 
 
 def batch_balances(
@@ -156,6 +157,23 @@ def list_accounts_with_stats(
     return result
 
 
+def create_account(db: Session, owner_id: str, data: AccountIn, as_of: date) -> dict:
+    lock_owner(db, owner_id)
+    obj = Account(owner_id=owner_id, **data.model_dump(exclude={"code"}), code=data.code or str(uuid4()))
+    db.add(obj)
+    db.flush()
+    return {**columns(obj), "balance": balance(db, obj, as_of), "tx_count": 0}
+
+
+def update_account_with_stats(db: Session, owner_id: str, key: str, data: AccountEdit, as_of: date) -> dict:
+    obj = edit_account(db, owner_id, key, data)
+    return {
+        **columns(obj),
+        "balance": balance(db, obj, as_of),
+        "tx_count": account_tx_count(db, owner_id, obj.id),
+    }
+
+
 def edit_account(db: Session, owner_id: str, key: str, data: AccountEdit) -> Account:
     lock_owner(db, owner_id)
     account = owned(db, Account, owner_id, key)
@@ -202,8 +220,8 @@ def delete_account(
             target = owned(db, Account, owner_id, transfer_to)
             for tx in affected:
                 if tx.kind == "transfer" and {tx.account_id, tx.to_account_id} == {key, target.id}:
-                    db.execute(delete(Entry).where(Entry.transaction_id == tx.id))
-                    db.execute(delete(Split).where(Split.transaction_id == tx.id))
+                    db.execute(delete(Entry).where(Entry.owner_id == owner_id, Entry.transaction_id == tx.id))
+                    db.execute(delete(Split).where(Split.owner_id == owner_id, Split.transaction_id == tx.id))
                     if tx.fee and tx.fee > 0:
                         tx.kind = "expense"
                         tx.account_id = target.id
@@ -214,10 +232,25 @@ def delete_account(
                         db.add(Entry(owner_id=owner_id, account_id=target.id, transaction_id=tx.id, delta=-tx.amount))
                         db.add(Split(owner_id=owner_id, transaction_id=tx.id, category_id=None, amount=tx.amount, role="fee"))
                     else:
-                        db.execute(update(Evidence).where(Evidence.transaction_id == tx.id).values(transaction_id=None))
-                        db.execute(update(Transaction).where(Transaction.original_id == tx.id).values(original_id=None))
-                        db.execute(delete(ReserveMovement).where(ReserveMovement.transaction_id == tx.id))
-                        db.execute(delete(Reserve).where(Reserve.income_id == tx.id))
+                        db.execute(
+                            update(Evidence)
+                            .where(Evidence.owner_id == owner_id, Evidence.transaction_id == tx.id)
+                            .values(transaction_id=None)
+                        )
+                        db.execute(
+                            update(Transaction)
+                            .where(Transaction.owner_id == owner_id, Transaction.original_id == tx.id)
+                            .values(original_id=None)
+                        )
+                        db.execute(
+                            delete(ReserveMovement).where(
+                                ReserveMovement.owner_id == owner_id,
+                                ReserveMovement.transaction_id == tx.id,
+                            )
+                        )
+                        db.execute(
+                            delete(Reserve).where(Reserve.owner_id == owner_id, Reserve.income_id == tx.id)
+                        )
                         db.delete(tx)
                 else:
                     if tx.account_id == key:
@@ -226,7 +259,7 @@ def delete_account(
                         tx.to_account_id = target.id
                     db.execute(
                         update(Entry)
-                        .where(Entry.transaction_id == tx.id, Entry.account_id == key)
+                        .where(Entry.owner_id == owner_id, Entry.transaction_id == tx.id, Entry.account_id == key)
                         .values(account_id=target.id)
                     )
             db.execute(
@@ -235,16 +268,41 @@ def delete_account(
                 .values(account_id=target.id)
             )
         elif cascade:
-            for tx in affected:
-                remove_transaction_records(db, owner_id, tx)
-            db.execute(delete(Reserve).where(Reserve.owner_id == owner_id, Reserve.account_id == key))
+            rank = {"refund": 0, "expense": 1, "transfer": 1, "income": 2}
+            ordered = sorted(affected, key=lambda t: rank.get(t.kind, 1))
+            for tx in ordered:
+                remove_transaction_records(db, owner_id, tx, allow_cascade_reserves=True)
+                db.flush()
+            rem_reserve_ids = list(
+                db.scalars(select(Reserve.id).where(Reserve.owner_id == owner_id, Reserve.account_id == key)).all()
+            )
+            if rem_reserve_ids:
+                db.execute(
+                    delete(ReserveMovement).where(
+                        ReserveMovement.owner_id == owner_id,
+                        ReserveMovement.reserve_id.in_(rem_reserve_ids),
+                    )
+                )
+                db.execute(
+                    delete(Reserve).where(Reserve.owner_id == owner_id, Reserve.id.in_(rem_reserve_ids))
+                )
         else:
             raise HTTPException(
                 409,
                 "Dompet masih memiliki transaksi. Pilih dompet tujuan pemindahan atau hapus beserta seluruh transaksinya.",
             )
     else:
-        db.execute(delete(Reserve).where(Reserve.owner_id == owner_id, Reserve.account_id == key))
+        rem_reserve_ids = list(
+            db.scalars(select(Reserve.id).where(Reserve.owner_id == owner_id, Reserve.account_id == key)).all()
+        )
+        if rem_reserve_ids:
+            db.execute(
+                delete(ReserveMovement).where(
+                    ReserveMovement.owner_id == owner_id,
+                    ReserveMovement.reserve_id.in_(rem_reserve_ids),
+                )
+            )
+            db.execute(delete(Reserve).where(Reserve.owner_id == owner_id, Reserve.id.in_(rem_reserve_ids)))
 
     db.execute(
         update(UserSettings)

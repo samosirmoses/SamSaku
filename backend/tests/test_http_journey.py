@@ -63,19 +63,11 @@ def test_capture_to_report(monkeypatch, tmp_path):
             first = client.post("/v1/webhooks/telegram", headers=webhook, json=update).json()
             replay = client.post("/v1/webhooks/telegram", headers=webhook, json=update).json()
             assert first == replay
-            assert client.get("/v1/transactions", headers=local).json() == []
-            button = first["reply_markup"]["inline_keyboard"][0][0]
-            assert button["text"] == "Simpan"
-            click = {
-                "callback_query": {
-                    "id": "sample",
-                    "from": {"id": 42},
-                    "message": {"message_id": 99, "chat": {"type": "private", "id": 42}},
-                    "data": button["callback_data"],
-                }
-            }
-            for _ in range(2):
-                assert client.post("/v1/webhooks/telegram", headers=webhook, json=click).status_code == 200
+            assert "✓ Tercatat" in first["text"]
+            assert "Saldo Tunai: Rp65.000" in first["text"]
+            buttons = first["reply_markup"]["inline_keyboard"][0]
+            assert [b["text"] for b in buttons] == ["Ganti Kategori", "Ganti Dompet", "Hapus"]
+            assert len(client.get("/v1/transactions", headers=local).json()) == 1
             period = {"start": "2025-01-01", "end": "2025-01-31"}
             report = client.get("/v1/summary", params=period, headers=local).json()
             assert report["expense"] == 35000 and len(report["transactions"]) == 1

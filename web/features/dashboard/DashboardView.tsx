@@ -1,5 +1,5 @@
 "use client";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, Plus, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowDownLeft, ArrowRight, ArrowUpRight, Plus, ShieldAlert, Sparkles } from "lucide-react";
 import { TxList } from "../../components/ui";
 import { type Account, type Data, type Review, type Transaction, money, period } from "../../lib/domain";
 import { PendingDraftsBanner } from "../reviews/PendingDraftsBanner";
@@ -51,16 +51,23 @@ export function DashboardView({
     const totalWalletBalance = data.accounts.reduce((acc, a) => acc + (a.balance || 0), 0);
 
     const budgets = data.budgets || [];
-    const totalBudget = budgets.reduce((sum, b) => sum + b.amount, 0);
-    const totalBudgetSpent = budgets.reduce((sum, b) => sum + b.spent, 0);
-    const budgetRemaining = totalBudget - totalBudgetSpent;
+    const alerts = s.budget_alerts || budgets.filter(b => b.status === "warning" || b.status === "over");
+    const pacing = s.pacing;
+    const totalBudget = pacing?.total_budget ?? budgets.reduce((sum, b) => sum + b.amount, 0);
+    const totalBudgetSpent = pacing?.total_budget_spent ?? budgets.reduce((sum, b) => sum + b.spent, 0);
+    const budgetRemaining = pacing?.budget_remaining ?? totalBudget - totalBudgetSpent;
     const endMs = new Date(range.end + "T23:59:59").getTime();
-    const remainingDays = Math.max(1, Math.ceil((endMs - Date.now()) / 86400000));
-    const safeDaily = totalBudget > 0 && budgetRemaining > 0 ? Math.floor(budgetRemaining / remainingDays) : null;
+    const remainingDays = pacing?.days_remaining ?? Math.max(1, Math.ceil((endMs - Date.now()) / 86400000));
+    const safeDaily =
+        pacing && pacing.allowance_basis !== "none"
+            ? pacing.safe_daily_allowance
+            : totalBudget > 0 && budgetRemaining > 0
+              ? Math.floor(budgetRemaining / Math.max(1, remainingDays))
+              : null;
 
     return (
         <div className="dashboard-clean-stack">
-            {/* ZONA 1: Alert Draf Tinjauan + Kartu Ringkasan Utama */}
+            {/* ZONA 1: Alert Draf Tinjauan + Peringatan Anggaran + Kartu Ringkasan Utama */}
             <PendingDraftsBanner
                 data={data}
                 highlightIds={highlightIds}
@@ -69,6 +76,26 @@ export function DashboardView({
                 onResolved={onReviewResolved}
                 onError={onError}
             />
+
+            {alerts.length > 0 && (
+                <div className={"budget-alert-banner " + (alerts.some(a => a.status === "over") ? "over" : "warning")}>
+                    <div className="budget-alert-text">
+                        {alerts.some(a => a.status === "over") ? <ShieldAlert size={16} /> : <AlertTriangle size={16} />}
+                        <span>
+                            <strong>{alerts.length} pos anggaran perlu perhatian:</strong>{" "}
+                            {alerts
+                                .slice(0, 3)
+                                .map(a => `${a.category_name} (${a.percent}%)`)
+                                .join(" · ")}
+                        </span>
+                    </div>
+                    {onBudgets && (
+                        <button type="button" className="btn sm" onClick={onBudgets}>
+                            Cek Anggaran <ArrowRight size={13} />
+                        </button>
+                    )}
+                </div>
+            )}
 
             <section className="hero clean-hero">
                 <div className="clean-hero-main">
@@ -81,10 +108,15 @@ export function DashboardView({
                             type="button"
                             className="hero-safe-pill"
                             onClick={onBudgets}
-                            title="Batas belanja aman per hari dari sisa anggaran"
+                            title={`Sisa anggaran aman per hari (${remainingDays} hari tersisa)`}
                         >
                             <Sparkles size={13} />
-                            <span>Aman {money(safeDaily)} / hari</span>
+                            <span>
+                                Aman {money(safeDaily)} / hr
+                                {pacing && totalBudget > 0
+                                    ? ` · ${pacing.budget_spent_percent}% anggaran (${pacing.elapsed_percent}% siklus)`
+                                    : ""}
+                            </span>
                         </button>
                     )}
                 </div>

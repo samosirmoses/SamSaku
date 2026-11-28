@@ -8,7 +8,7 @@ import jwt
 from fastapi import Header, HTTPException
 from jwt import PyJWKClient
 
-from .config import DEFAULT_OWNER_ID
+from .config import DEFAULT_OWNER_ID, is_production
 
 
 def configured_owner() -> str:
@@ -33,7 +33,7 @@ def jwks(url: str) -> PyJWKClient:
 
 def verify_owner(authorization: str = "", x_dev_token: str = "") -> str:
     user_id = configured_owner()
-    if (os.getenv("SAMSAKU_ENV") != "production" or not os.getenv("OWNER_ID")) and secret_matches(
+    if (not is_production() or not os.getenv("OWNER_ID", "").strip()) and secret_matches(
         x_dev_token, "SAMSAKU_DEV_TOKEN"
     ):
         return user_id

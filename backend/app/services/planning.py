@@ -3,15 +3,16 @@ import hashlib
 import json
 from collections import defaultdict
 from datetime import date, datetime
+from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..core.config import JAKARTA
 from ..core.db import lock_owner
 from ..models import Account, Allocation, Category, Goal, Reserve, Scheme, Transaction
-from ..schemas import ApplyIn, SchemeIn
+from ..schemas import ApplyIn, GoalIn, SchemeIn
 from .accounts import active_reserves, balance
 from .calculations import cycle, divide
 from .common import columns, fail, owned, rows
@@ -22,6 +23,9 @@ def today() -> date:
 
 
 def list_goals_with_reserves(db: Session, owner_id: str) -> list[dict]:
+    goal_rows = list(rows(db, Goal, owner_id))
+    if not goal_rows:
+        return []
     totals = dict(
         db.execute(
             select(Reserve.goal_id, func.sum(Reserve.remaining))
@@ -29,7 +33,19 @@ def list_goals_with_reserves(db: Session, owner_id: str) -> list[dict]:
             .group_by(Reserve.goal_id)
         ).all()
     )
-    return [{**columns(g), "reserved": int(totals.get(g.id, 0) or 0)} for g in rows(db, Goal, owner_id)]
+    return [{**columns(g), "reserved": int(totals.get(g.id, 0) or 0)} for g in goal_rows]
+
+
+def delete_goal_item(db: Session, owner_id: str, key: str) -> None:
+    lock_owner(db, owner_id)
+    obj = owned(db, Goal, owner_id, key)
+    db.execute(
+        update(Reserve)
+        .where(Reserve.owner_id == owner_id, Reserve.goal_id == obj.id)
+        .values(goal_id=None)
+    )
+    db.delete(obj)
+    db.flush()
 
 
 def list_schemes_with_pots(db: Session, owner_id: str, as_of: date | None = None) -> list[dict]:
@@ -87,8 +103,35 @@ def validate_scheme(db: Session, owner_id: str, payload: SchemeIn) -> None:
         fail("Hanya satu pos sisa dan total persentase maksimal 100%.")
 
 
-def plan_allocation(db: Session, owner_id: str, scheme_id: str, data: ApplyIn, persist: bool = False) -> dict:
+def create_goal_item(db: Session, owner_id: str, data: GoalIn) -> dict:
     lock_owner(db, owner_id)
+    obj = Goal(owner_id=owner_id, **data.model_dump())
+    db.add(obj)
+    db.flush()
+    return {**columns(obj), "reserved": 0}
+
+
+def create_scheme_item(db: Session, owner_id: str, data: SchemeIn) -> dict:
+    lock_owner(db, owner_id)
+    validate_scheme(db, owner_id, data)
+    obj = Scheme(owner_id=owner_id, **data.model_dump(exclude={"code"}), code=data.code or str(uuid4()))
+    db.add(obj)
+    db.flush()
+    return columns(obj)
+
+
+def update_scheme_item(db: Session, owner_id: str, key: str, data: SchemeIn) -> dict:
+    lock_owner(db, owner_id)
+    obj = owned(db, Scheme, owner_id, key)
+    validate_scheme(db, owner_id, data)
+    obj.name, obj.cycle_day, obj.rules = data.name, data.cycle_day, data.model_dump()["rules"]
+    db.flush()
+    return columns(obj)
+
+
+def plan_allocation(db: Session, owner_id: str, scheme_id: str, data: ApplyIn, persist: bool = False) -> dict:
+    if persist:
+        lock_owner(db, owner_id)
     scheme = owned(db, Scheme, owner_id, scheme_id)
     signature = {"income_ids": sorted(set(data.income_ids)), "date": data.date.isoformat(), "scheme_id": scheme_id}
     if len(signature["income_ids"]) != len(data.income_ids):
@@ -122,7 +165,10 @@ def plan_allocation(db: Session, owner_id: str, scheme_id: str, data: ApplyIn, p
                 return max(0, account_balance - sum(r.remaining for r in active_reserves(db, owner_id, account.id, day)))
 
             free[account.id] = min(available(data.date), available(current))
-        consumed = int(db.scalar(select(func.sum(Reserve.amount)).where(Reserve.income_id == key)) or 0)
+        consumed = int(
+            db.scalar(select(func.sum(Reserve.amount)).where(Reserve.owner_id == owner_id, Reserve.income_id == key))
+            or 0
+        )
         amount = min(max(0, tx.amount - consumed), free[account.id])
         if amount:
             sources.append([tx, amount])
@@ -133,7 +179,12 @@ def plan_allocation(db: Session, owner_id: str, scheme_id: str, data: ApplyIn, p
     fixed_totals = db.execute(
         select(Reserve.pot_name, func.sum(Reserve.amount))
         .join(Allocation, Reserve.application_id == Allocation.id)
-        .where(Allocation.scheme_id == scheme_id, Allocation.cycle_start == period)
+        .where(
+            Reserve.owner_id == owner_id,
+            Allocation.owner_id == owner_id,
+            Allocation.scheme_id == scheme_id,
+            Allocation.cycle_start == period,
+        )
         .group_by(Reserve.pot_name)
     ).all()
     used_fixed = {name: int(amount) for name, amount in fixed_totals}

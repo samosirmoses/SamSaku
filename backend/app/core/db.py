@@ -5,6 +5,8 @@ from collections.abc import Iterator
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from .config import app_env
+
 
 class Base(DeclarativeBase):
     pass
@@ -17,7 +19,7 @@ def normalize_url(url: str) -> str:
 
 
 url = normalize_url(os.getenv("DATABASE_URL", "sqlite:///./samsaku.db"))
-if url.startswith("sqlite") and os.getenv("SAMSAKU_ENV") not in {"development", "test"}:
+if url.startswith("sqlite") and app_env() not in {"development", "test"}:
     raise RuntimeError("Production requires a PostgreSQL DATABASE_URL.")
 
 if url.startswith("sqlite"):

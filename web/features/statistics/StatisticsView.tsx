@@ -1,14 +1,12 @@
 "use client";
 import { useState } from "react";
 import { ArrowDownLeft, ArrowUpRight, BarChart3, PieChart, TrendingUp, Wallet } from "lucide-react";
+import { aggregateDailyTransactions, aggregateWeeklySeries } from "../../lib/charts";
 import {
     type Data,
     compactMoney,
-    expense,
-    income,
     money,
     period,
-    shortDate,
     weekdayShort,
 } from "../../lib/domain";
 import { DonutChart } from "./DonutChart";
@@ -30,58 +28,16 @@ export function StatisticsView({
     const startDay = data.settings?.monthly_start_day || 1;
     const weekStart = data.settings?.weekly_start_day ?? 1;
     const range = period(month, startDay);
-    const startMs = new Date(range.start + "T12:00:00").getTime();
-    const endMs = new Date(range.end + "T12:00:00").getTime();
-    const daysCount = Math.max(1, Math.round((endMs - startMs) / 86400000) + 1);
-
-    const dailySeries = Array.from({ length: daysCount }, (_, i) => {
-        const d = new Date(startMs + i * 86400000);
-        const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-        return {
-            date: iso,
-            label: String(d.getDate()),
-            fullLabel: shortDate(iso),
-            income: 0,
-            expense: 0,
-            dow: d.getDay(),
-        };
-    });
-    const idxByDate = new Map(dailySeries.map((d, i) => [d.date, i]));
-    for (const tx of data.transactions) {
-        const idx = idxByDate.get(tx.date.slice(0, 10));
-        if (idx !== undefined) {
-            dailySeries[idx].income += income(tx);
-            dailySeries[idx].expense += Math.max(0, expense(tx));
-        }
-    }
-
-    const weeklySeries: { label: string; fullLabel: string; income: number; expense: number }[] = [];
-    let currentWeek: { startDate: string; endDate: string; income: number; expense: number } | null = null;
-    for (const d of dailySeries) {
-        if (!currentWeek || d.dow === weekStart) {
-            if (currentWeek) {
-                const lbl = `${shortDate(currentWeek.startDate)} – ${shortDate(currentWeek.endDate)}`;
-                weeklySeries.push({ label: lbl, fullLabel: lbl, income: currentWeek.income, expense: currentWeek.expense });
-            }
-            currentWeek = { startDate: d.date, endDate: d.date, income: d.income, expense: d.expense };
-        } else {
-            currentWeek.endDate = d.date;
-            currentWeek.income += d.income;
-            currentWeek.expense += d.expense;
-        }
-    }
-    if (currentWeek) {
-        const lbl = `${shortDate(currentWeek.startDate)} – ${shortDate(currentWeek.endDate)}`;
-        weeklySeries.push({ label: lbl, fullLabel: lbl, income: currentWeek.income, expense: currentWeek.expense });
-    }
+    const dailySeries = aggregateDailyTransactions(data.transactions, range.start, range.end);
+    const weeklySeries = aggregateWeeklySeries(dailySeries, weekStart);
 
     const dowTotals = Array(7).fill(0) as number[];
     for (const d of dailySeries) dowTotals[d.dow] += d.expense;
     const orderedDows = Array.from({ length: 7 }, (_, i) => (weekStart + i) % 7);
-    const maxDow = Math.max(1, ...dowTotals);
+    const maxDow = Math.max(1, ...dowTotals.map(v => Math.max(0, v)));
 
     const activeBars = barMode === "daily" ? dailySeries : weeklySeries;
-    const maxBarValue = Math.max(1, ...activeBars.flatMap(b => [b.income, b.expense]));
+    const maxBarValue = Math.max(1, ...activeBars.flatMap(b => [Math.max(0, b.income), Math.max(0, b.expense)]));
     const activeBarItem = selectedBarIdx !== null && activeBars[selectedBarIdx] ? activeBars[selectedBarIdx] : null;
 
     const incomeCats =
@@ -173,54 +129,74 @@ export function StatisticsView({
                             <h2>Perbandingan siklus lalu</h2>
                             <BarChart3 size={18} />
                         </div>
-                        {prev ? (
-                            <div className="comparison-bars">
-                                {[
-                                    {
-                                        label: "Uang Masuk",
-                                        curr: s.income,
-                                        old: prev.income,
-                                        cls: "bar-safe",
-                                        textCls: "income",
-                                    },
-                                    {
-                                        label: "Uang Keluar",
-                                        curr: s.expense,
-                                        old: prev.expense,
-                                        cls: "bar-over",
-                                        textCls: "expense-amt",
-                                    },
-                                ].map(row => {
-                                    const maxVal = Math.max(1, row.curr, row.old);
-                                    return (
-                                        <div key={row.label} className="comp-group">
-                                            <div className="category-label">
-                                                <strong>{row.label}</strong>
-                                                <b className={row.textCls}>{money(row.curr)}</b>
-                                            </div>
-                                            <div className="bar-line">
-                                                <span className="bar-track" style={{ height: 8 }}>
-                                                    <span
-                                                        className={"bar " + row.cls}
-                                                        style={{ width: Math.max(2, (100 * row.curr) / maxVal) + "%" }}
-                                                    />
-                                                </span>
-                                                <small>Siklus ini</small>
-                                            </div>
-                                            <div className="bar-line">
-                                                <span className="bar-track" style={{ height: 6 }}>
-                                                    <span
-                                                        className="bar bar-muted"
-                                                        style={{ width: Math.max(2, (100 * row.old) / maxVal) + "%" }}
-                                                    />
-                                                </span>
-                                                <small>Lalu ({compactMoney(row.old)})</small>
-                                            </div>
+                    {prev ? (
+                        <div className="comparison-bars">
+                            {[
+                                {
+                                    label: "Uang Masuk",
+                                    curr: s.income,
+                                    old: prev.income,
+                                    cls: "bar-safe",
+                                    textCls: "income",
+                                },
+                                {
+                                    label: "Uang Keluar",
+                                    curr: s.expense,
+                                    old: prev.expense,
+                                    cls: "bar-over",
+                                    textCls: "expense-amt",
+                                },
+                            ].map(row => {
+                                const safeCurr = Math.max(0, row.curr);
+                                const safeOld = Math.max(0, row.old);
+                                const maxVal = Math.max(1, safeCurr, safeOld);
+                                return (
+                                    <div key={row.label} className="comp-group">
+                                        <div className="category-label">
+                                            <strong>{row.label}</strong>
+                                            <b className={row.textCls}>{money(row.curr)}</b>
                                         </div>
-                                    );
-                                })}
-                            </div>
-                        ) : (
+                                        <div className="bar-line">
+                                            <span className="bar-track" style={{ height: 8 }}>
+                                                <span
+                                                    className={"bar " + row.cls}
+                                                    style={{ width: Math.max(2, (100 * safeCurr) / maxVal) + "%" }}
+                                                />
+                                            </span>
+                                            <small>Siklus ini</small>
+                                        </div>
+                                        <div className="bar-line">
+                                            <span className="bar-track" style={{ height: 6 }}>
+                                                <span
+                                                    className="bar bar-muted"
+                                                    style={{ width: Math.max(2, (100 * safeOld) / maxVal) + "%" }}
+                                                />
+                                            </span>
+                                            <small>Lalu ({compactMoney(row.old)})</small>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                            {s.category_deltas && s.category_deltas.length > 0 && (
+                                <div className="delta-list">
+                                    <small className="muted">Perubahan kategori terbesar</small>
+                                    {s.category_deltas.slice(0, 5).map(d => (
+                                        <div
+                                            key={d.name}
+                                            className="delta-row clickable"
+                                            onClick={() => onSelectCategory?.(d.name)}
+                                        >
+                                            <span>{d.name}</span>
+                                            <strong className={d.delta > 0 ? "expense-amt" : d.delta < 0 ? "income" : ""}>
+                                                {d.delta > 0 ? `+${compactMoney(d.delta)}` : d.delta < 0 ? `−${compactMoney(Math.abs(d.delta))}` : "Tetap"}
+                                                {d.previous > 0 ? ` (${d.delta > 0 ? "+" : ""}${d.percent_change}%)` : ""}
+                                            </strong>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    ) : (
                             <p className="empty">Data siklus sebelumnya belum tersedia.</p>
                         )}
                     </section>
@@ -233,14 +209,15 @@ export function StatisticsView({
                         <div className="dow-chart">
                             {orderedDows.map(dow => {
                                 const val = dowTotals[dow];
-                                const hPct = Math.round((100 * val) / maxDow);
+                                const hPct = Math.round((100 * Math.max(0, val)) / maxDow);
+                                const valLabel = val < 0 ? `+${compactMoney(Math.abs(val))}` : val > 0 ? compactMoney(val) : "0";
                                 return (
                                     <div key={dow} className="dow-col" title={`${weekdayShort[dow]}: ${money(val)}`}>
                                         <div className="dow-bar-wrap">
                                             <span className="dow-bar" style={{ height: Math.max(4, hPct) + "%" }} />
                                         </div>
                                         <strong>{weekdayShort[dow]}</strong>
-                                        <small>{val > 0 ? compactMoney(val) : "0"}</small>
+                                        <small>{valLabel}</small>
                                     </div>
                                 );
                             })}
@@ -255,7 +232,7 @@ export function StatisticsView({
                         <h2>Grafik arus kas ({barMode === "daily" ? "Harian" : "Mingguan"})</h2>
                         <small className="muted">
                             {activeBarItem
-                                ? `${activeBarItem.fullLabel} · Masuk: +${money(activeBarItem.income)} · Keluar: −${money(activeBarItem.expense)}`
+                                ? `${activeBarItem.fullLabel} · Masuk: +${money(activeBarItem.income)} · Keluar: ${activeBarItem.expense < 0 ? "+" + money(Math.abs(activeBarItem.expense)) : "−" + money(activeBarItem.expense)}`
                                 : "Arahkan atau klik batang grafik untuk melihat rincian nominal"}
                         </small>
                     </div>
@@ -286,8 +263,8 @@ export function StatisticsView({
                 <div className="cashflow-chart-scroll">
                     <div className={"cashflow-bars " + (barMode === "weekly" ? "weekly" : "daily")}>
                         {activeBars.map((b, i) => {
-                            const incH = Math.round((100 * b.income) / maxBarValue);
-                            const expH = Math.round((100 * b.expense) / maxBarValue);
+                            const incH = Math.round((100 * Math.max(0, b.income)) / maxBarValue);
+                            const expH = Math.round((100 * Math.max(0, b.expense)) / maxBarValue);
                             return (
                                 <div
                                     key={i}

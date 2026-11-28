@@ -14,6 +14,7 @@ import {
 import { CatIcon, ErrorNote } from "../../components/ui";
 import { del, post } from "../../lib/api";
 import { type Budget, type Data, expense, formatDots, money, parseDigits, period } from "../../lib/domain";
+import { GoalsPanel } from "./GoalsPanel";
 
 export function BudgetsView({
     data,
@@ -36,13 +37,20 @@ export function BudgetsView({
     const startDay = data.settings?.monthly_start_day || 1;
     const range = period(month, startDay);
     const endMs = new Date(range.end + "T23:59:59").getTime();
-    const remainingDays = Math.max(1, Math.ceil((endMs - Date.now()) / 86400000));
+    const pacing = data.summary?.pacing;
+    const remainingDays = pacing?.days_remaining ?? Math.max(1, Math.ceil((endMs - Date.now()) / 86400000));
+    const alerts = data.summary?.budget_alerts || budgets.filter(b => b.status === "warning" || b.status === "over");
 
-    const totalBudget = budgets.reduce((sum, b) => sum + b.amount, 0);
-    const totalSpent = budgets.reduce((sum, b) => sum + b.spent, 0);
-    const totalRemaining = totalBudget - totalSpent;
-    const totalPct = totalBudget > 0 ? Math.round((100 * totalSpent) / totalBudget) : 0;
-    const safeDailyTotal = totalRemaining > 0 ? Math.floor(totalRemaining / remainingDays) : 0;
+    const totalBudget = pacing?.total_budget ?? budgets.reduce((sum, b) => sum + b.amount, 0);
+    const totalSpent = pacing?.total_budget_spent ?? budgets.reduce((sum, b) => sum + b.spent, 0);
+    const totalRemaining = pacing?.budget_remaining ?? totalBudget - totalSpent;
+    const totalPct = pacing?.budget_spent_percent ?? (totalBudget > 0 ? Math.round((100 * totalSpent) / totalBudget) : 0);
+    const safeDailyTotal =
+        pacing && totalBudget > 0
+            ? pacing.safe_daily_allowance
+            : totalRemaining > 0
+              ? Math.floor(totalRemaining / Math.max(1, remainingDays))
+              : 0;
 
     const unbudgetedCategories = expenseCategories.filter(c => !budgets.some(b => b.category_id === c.id));
 
@@ -110,22 +118,49 @@ export function BudgetsView({
                     </div>
                 </div>
                 {totalBudget > 0 && (
-                    <div className="bar-line" style={{ marginTop: 14 }}>
-                        <span className="bar-track" style={{ height: 10 }}>
-                            <span
-                                className={
-                                    "bar " +
-                                    (totalPct > 100 ? "bar-over" : totalPct >= 80 ? "bar-warn" : "bar-safe")
-                                }
-                                style={{ width: Math.min(100, Math.max(2, totalPct)) + "%" }}
-                            />
-                        </span>
-                        <small>
-                            <b>{totalPct}%</b> terpakai
-                        </small>
+                    <div className="pacing-strip" style={{ marginTop: 14 }}>
+                        <div className="bar-line">
+                            <span className="bar-track" style={{ height: 10 }}>
+                                <span
+                                    className={
+                                        "bar " +
+                                        (totalPct > 100 ? "bar-over" : totalPct >= 80 ? "bar-warn" : "bar-safe")
+                                    }
+                                    style={{ width: Math.min(100, Math.max(2, totalPct)) + "%" }}
+                                />
+                            </span>
+                            <small>
+                                <b>{totalPct}%</b> anggaran terpakai
+                            </small>
+                        </div>
+                        {pacing && (
+                            <div className="bar-line" style={{ marginTop: 6 }}>
+                                <span className="bar-track" style={{ height: 6 }}>
+                                    <span
+                                        className="bar bar-muted"
+                                        style={{ width: Math.min(100, Math.max(2, pacing.elapsed_percent)) + "%" }}
+                                    />
+                                </span>
+                                <small className="muted">
+                                    {pacing.elapsed_percent}% waktu siklus ({pacing.days_elapsed}/{pacing.days_total} hari)
+                                </small>
+                            </div>
+                        )}
                     </div>
                 )}
             </section>
+
+            {alerts.length > 0 && (
+                <div className={"budget-alert-banner " + (alerts.some(a => a.status === "over") ? "over" : "warning")}>
+                    <div className="budget-alert-text">
+                        {alerts.some(a => a.status === "over") ? <ShieldAlert size={16} /> : <AlertTriangle size={16} />}
+                        <span>
+                            <strong>Peringatan Anggaran:</strong>{" "}
+                            {alerts.map(a => `${a.category_name} (${a.percent}%)`).join(" · ")}
+                        </span>
+                    </div>
+                </div>
+            )}
 
             <div className="two-cols">
                 <section className="card">
@@ -300,6 +335,8 @@ export function BudgetsView({
                             <p className="empty">Buat kategori pengeluaran di Master data terlebih dahulu.</p>
                         )}
                     </section>
+
+                    <GoalsPanel goals={data.goals || []} onDone={onDone} />
 
                     {unbudgetedCategories.length > 0 && (
                         <section className="card">

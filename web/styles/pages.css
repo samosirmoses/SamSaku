@@ -1497,3 +1497,53 @@
     box-shadow: none;
   }
 }
+
+.budget-alert-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 11px 15px;
+  border-radius: 13px;
+  border: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.budget-alert-banner.warning {
+  background: color-mix(in srgb, #d97706 11%, var(--paper));
+  border-color: color-mix(in srgb, #d97706 38%, var(--line));
+}
+
+.budget-alert-banner.over {
+  background: color-mix(in srgb, #b91c1c 11%, var(--paper));
+  border-color: color-mix(in srgb, #b91c1c 40%, var(--line));
+}
+
+.budget-alert-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.delta-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.delta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12.5px;
+  padding: 4px 6px;
+  border-radius: 8px;
+}
+
+.delta-row.clickable:hover {
+  background: var(--paper-subtle);
+}

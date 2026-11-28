@@ -6,8 +6,8 @@ from datetime import date
 
 def rupiah(raw: str) -> int | None:
     value = raw.lower().strip()
-    has_idr = value.startswith("idr")
-    value = value.removeprefix("rp").removeprefix("idr").strip()
+    has_idr = bool(re.match(r"^idr\b", value))
+    value = re.sub(r"^(?:idr|rp\.?)\s*", "", value).strip()
     match = re.fullmatch(r"(\d{1,12})(k|rb|jt)", value)
     if match:
         return int(match[1]) * (1_000_000 if match[2] == "jt" else 1_000)

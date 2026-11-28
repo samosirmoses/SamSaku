@@ -2,7 +2,10 @@ import {
     Account,
     Budget,
     Category,
+    CategoryDelta,
+    CyclePacing,
     Data,
+    Goal,
     Settings,
     Summary,
     Transaction,
@@ -21,6 +24,7 @@ type DemoStore = {
     categories: Category[];
     transactions: Transaction[];
     budgetSpecs: { id: string; category_id: string; amount: number }[];
+    goals?: Goal[];
     settings: Settings;
 };
 
@@ -83,6 +87,11 @@ function initialStore(): DemoStore {
         default_account_id: "bca",
     };
 
+    const goals: Goal[] = [
+        { id: "goal-darurat", name: "Dana Darurat", target: 10_000_000, reserved: 2_500_000, target_date: null },
+        { id: "goal-liburan", name: "Liburan Keluarga", target: 4_000_000, reserved: 1_200_000, target_date: null },
+    ];
+
     const seedRows: [string, string, number, string, Transaction["kind"], number, string?][] = [
         ["Gaji bulanan", "salary", 8500000, "bca", "income", 0.03],
         ["Project desain UI", "bonus", 1500000, "bca", "income", 0.38],
@@ -129,7 +138,7 @@ function initialStore(): DemoStore {
         });
     }
 
-    return { accounts, categories, transactions, budgetSpecs, settings };
+    return { accounts, categories, transactions, budgetSpecs, goals, settings };
 }
 
 function loadStore(): DemoStore {
@@ -312,6 +321,78 @@ function computeSummary(store: DemoStore, start: string, end: string): Summary {
 
     const accounts = computeAccounts(store, end);
     const budgets = computeBudgets(store, start, end);
+    const budget_alerts = budgets.filter(b => b.status === "warning" || b.status === "over");
+
+    const prevCatMap = new Map<string, number>();
+    for (const t of prevTxs) {
+        if (t.kind === "expense" || t.kind === "refund") {
+            if (t.splits?.length) {
+                for (const sp of t.splits) {
+                    const cName =
+                        store.categories.find(c => c.id === sp.category_id)?.name || "Belum dikategorikan";
+                    prevCatMap.set(cName, (prevCatMap.get(cName) || 0) + sp.amount);
+                }
+            } else {
+                const cName =
+                    store.categories.find(c => c.id === t.category_id)?.name || "Belum dikategorikan";
+                prevCatMap.set(cName, (prevCatMap.get(cName) || 0) + expense(t));
+            }
+        } else if (t.kind === "transfer" && t.fee) {
+            prevCatMap.set("Biaya admin", (prevCatMap.get("Biaya admin") || 0) + t.fee);
+        }
+    }
+    const category_deltas: CategoryDelta[] = Array.from(new Set([...catMap.keys(), ...prevCatMap.keys()]))
+        .map(name => {
+            const current = catMap.get(name) || 0;
+            const previous = prevCatMap.get(name) || 0;
+            const delta = current - previous;
+            const percent_change = previous > 0 ? Math.round((100 * delta) / previous) : current > 0 ? 100 : 0;
+            return { name, current, previous, delta, percent_change };
+        })
+        .filter(d => d.current !== 0 || d.previous !== 0)
+        .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.current - a.current)
+        .slice(0, 8);
+
+    const todayIso = today();
+    const daysTotal = Math.max(1, Math.round((endMs - startMs) / 86400000) + 1);
+    const todayMs = new Date(todayIso + "T12:00:00").getTime();
+    const daysElapsed =
+        todayIso < start ? 0 : todayIso > end ? daysTotal : Math.max(1, Math.round((todayMs - startMs) / 86400000) + 1);
+    const daysRemaining = todayIso < start ? daysTotal : todayIso > end ? 0 : Math.max(0, daysTotal - daysElapsed + 1);
+    const elapsedPercent = Math.round((100 * daysElapsed) / daysTotal);
+    const totalBudget = budgets.reduce((acc, b) => acc + b.amount, 0);
+    const totalBudgetSpent = budgets.reduce((acc, b) => acc + b.spent, 0);
+    const budgetRemaining = totalBudget - totalBudgetSpent;
+    const budgetSpentPercent = totalBudget > 0 ? Math.round((100 * totalBudgetSpent) / totalBudget) : 0;
+    const safeDaily =
+        daysRemaining <= 0
+            ? 0
+            : totalBudget > 0
+              ? Math.floor(Math.max(0, budgetRemaining) / daysRemaining)
+              : inc > 0
+                ? Math.floor(Math.max(0, inc - ex) / daysRemaining)
+                : 0;
+    const pacing: CyclePacing = {
+        as_of: todayIso,
+        days_total: daysTotal,
+        days_elapsed: daysElapsed,
+        days_remaining: daysRemaining,
+        elapsed_percent: elapsedPercent,
+        total_budget: totalBudget,
+        total_budget_spent: totalBudgetSpent,
+        budget_remaining: budgetRemaining,
+        budget_spent_percent: budgetSpentPercent,
+        safe_daily_allowance: safeDaily,
+        allowance_basis: totalBudget > 0 ? "budget" : inc > 0 ? "income" : "none",
+        pacing_status:
+            totalBudget === 0
+                ? "no_budget"
+                : totalBudgetSpent > totalBudget
+                  ? "over"
+                  : budgetSpentPercent >= 80 || budgetSpentPercent >= elapsedPercent + 10
+                    ? "ahead"
+                    : "on_track",
+    };
 
     return {
         start,
@@ -322,6 +403,9 @@ function computeSummary(store: DemoStore, start: string, end: string): Summary {
         categories,
         income_categories,
         budgets,
+        budget_alerts,
+        pacing,
+        category_deltas,
         previous: {
             start: prevStart,
             end: prevEnd,
@@ -348,6 +432,7 @@ export function demo(month: string, customSettings?: Settings): Data {
         categories: store.categories,
         transactions: summary.transactions,
         budgets: summary.budgets || [],
+        goals: store.goals || [],
         settings: store.settings,
         reviews: [],
         summary,
@@ -383,6 +468,7 @@ export function handleDemoRequest(path: string, init: RequestInit = {}): unknown
             transactions: summary.transactions,
             reviews: [],
             budgets: summary.budgets || computeBudgets(store, start, end),
+            goals: store.goals || [],
             summary,
             connections: [
                 { source: "bca", last_received_at: null },
@@ -602,6 +688,29 @@ export function handleDemoRequest(path: string, init: RequestInit = {}): unknown
             saveStore(store);
             return null;
         }
+    }
+
+    // Goals
+    if (pathname === "/goals") {
+        if (method === "GET") return store.goals || [];
+        if (method === "POST") {
+            const nextGoal: Goal = {
+                id: "goal-" + Date.now(),
+                name: String(body.name || "").trim(),
+                target: Number(body.target || 0),
+                reserved: 0,
+                target_date: body.target_date || null,
+            };
+            store.goals = [...(store.goals || []), nextGoal];
+            saveStore(store);
+            return nextGoal;
+        }
+    }
+    if (pathname.startsWith("/goals/") && method === "DELETE") {
+        const id = decodeURIComponent(pathname.slice("/goals/".length));
+        store.goals = (store.goals || []).filter(g => g.id !== id);
+        saveStore(store);
+        return null;
     }
 
     // Summary

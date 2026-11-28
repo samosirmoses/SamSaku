@@ -46,8 +46,17 @@ GEMINI_API_KEY=<api-key-google-ai-studio-anda>
 GEMINI_MODEL=gemini-3.5-flash-lite
 ```
 - Jika belum memakai domain (akses via IP), biarkan `SAMSAKU_DOMAIN=:80`.
+- **CORS Produksi Wajib Eksplisit:** Saat `SAMSAKU_ENV=production`, `CORS_ORIGINS` **wajib** diisi domain origin asli (misalnya `CORS_ORIGINS=https://keuangan.domainanda.com`) tanpa wildcard `*`; API akan menolak startup jika kosong atau memakai `*`.
+- **Pertahanan Edge (`ops/Caddyfile` & FastAPI Rate Limiter):**
+  - Caddy menambahkan security headers (`Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`) serta batas ukuran body (`1MB` pada `/v1/webhooks/*`, `8MB` pada `/v1/*`).
+  - Rate limit in-memory berbatas memori di FastAPI melindungi endpoint webhook/intake (`SAMSAKU_RATE_LIMIT_WEBHOOK_PER_MIN`, default `60/menit`) dan lonjakan gagal autentikasi `401`/`403` (`SAMSAKU_RATE_LIMIT_AUTH_FAIL_PER_MIN`, default `30/menit`), serta WebSocket membatasi koneksi aktif (`SAMSAKU_WS_MAX_PER_OWNER=5`, `SAMSAKU_WS_MAX_GLOBAL=50`).
+  - Render PDF WeasyPrint dilindungi semaphore konkurensi tunggal (`429` bila sibuk), batas rentang `<= 366` selisih hari, dan batas `500` baris rincian (`422`) untuk mencegah OOMKill di VPS 384 MB.
 - Jika memakai domain, arahkan DNS A-record ke IP VPS dan buka port TCP `80` serta `443` di firewall — Caddy akan mengurus sertifikat TLS Let's Encrypt otomatis.
 - Jika ingin memakai Google/Email Login via Supabase, isi juga `OWNER_ID`, `SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_URL`, dan `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+- **Bot Telegram (Webhook vs Polling & Rekap Harian):**
+  - Di VPS HTTPS berdomain, isi `PUBLIC_API_URL=https://<domain-anda>` (atau `RENDER_EXTERNAL_URL`) dan biarkan `SAMSAKU_TELEGRAM_POLL=0`/kosong agar mode webhook aktif tanpa menghapus webhook lewat polling.
+  - Untuk pengujian lokal/IP tanpa HTTPS publik, set `SAMSAKU_TELEGRAM_POLL=1` agar long-polling aktif.
+  - Set `SAMSAKU_TELEGRAM_DAILY_RECAP=1` (opsional `SAMSAKU_TELEGRAM_RECAP_HOUR=21`) untuk mengirim ringkasan harian pukul 21:00 WIB maksimal 1x/hari (terpicu saat polling atau `POST /v1/jobs/tick`).
 
 ---
 
@@ -93,6 +102,7 @@ gpg --decrypt samsaku-2026-11-26.dump.gpg \
   | docker compose -f compose.prod.yaml exec -T db \
     pg_restore -U samsaku -d samsaku --clean --if-exists --no-owner --no-privileges
 ```
+Jika memakai skrip terpadu `python ops/backup.py restore <arsip.dump.gpg>`, skrip otomatis memanggil `reapply_table_privilege_hardening()` untuk menerapkan ulang `REVOKE ALL ON TABLE public.* FROM PUBLIC` (dan role `anon` / `authenticated` jika ada) setelah `pg_restore --no-privileges` selesai.
 
 ---
 

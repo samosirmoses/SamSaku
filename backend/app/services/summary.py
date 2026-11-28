@@ -21,6 +21,7 @@ def _spent_by_category(db: Session, owner_id: str, start: date, end: date) -> di
         select(Split.category_id, func.coalesce(func.sum(Split.amount), 0))
         .join(Transaction, Transaction.id == Split.transaction_id)
         .where(
+            Split.owner_id == owner_id,
             Transaction.owner_id == owner_id,
             Transaction.date.between(start, end),
             Split.role != "income",
@@ -56,8 +57,8 @@ def list_budgets(
         cat_ids = [b.category_id, *children_map.get(b.category_id, [])]
         spent = max(0, sum(spent_map.get(cid, 0) for cid in cat_ids))
         remaining = b.amount - spent
-        percent = round(100 * spent / b.amount) if b.amount > 0 else 0
-        status = "over" if spent > b.amount else "warning" if spent >= int(b.amount * 0.8) else "safe"
+        percent = (spent * 100 + b.amount // 2) // b.amount if b.amount > 0 else 0
+        status = "over" if spent > b.amount else "warning" if spent * 5 >= b.amount * 4 else "safe"
         result.append(
             {
                 "id": b.id,
@@ -95,20 +96,89 @@ def delete_budget(db: Session, owner_id: str, key: str) -> None:
     db.flush()
 
 
-def _period_totals(db: Session, owner_id: str, start: date, end: date) -> dict:
+def _period_totals_and_categories(
+    db: Session, owner_id: str, start: date, end: date, category_names: dict[str, str]
+) -> tuple[dict, dict[str, int]]:
     agg = db.execute(
-        select(Split.role, func.coalesce(func.sum(Split.amount), 0))
+        select(Split.role, Split.category_id, func.coalesce(func.sum(Split.amount), 0))
         .join(Transaction, Transaction.id == Split.transaction_id)
-        .where(Transaction.owner_id == owner_id, Transaction.date.between(start, end))
-        .group_by(Split.role)
+        .where(Split.owner_id == owner_id, Transaction.owner_id == owner_id, Transaction.date.between(start, end))
+        .group_by(Split.role, Split.category_id)
     ).all()
     inc = exp = 0
-    for role, total in agg:
+    cat_totals: dict[str, int] = defaultdict(int)
+    for role, category_id, total in agg:
+        val = int(total)
         if role == "income":
-            inc += int(total)
+            inc += val
         else:
-            exp += int(total)
-    return {"start": start, "end": end, "income": inc, "expense": exp, "net": inc - exp}
+            exp += val
+            name = "Biaya admin" if role == "fee" else category_names.get(category_id, "Belum dikategorikan")
+            cat_totals[name] += val
+    return {"start": start, "end": end, "income": inc, "expense": exp, "net": inc - exp}, cat_totals
+
+
+def compute_cycle_pacing(
+    start: date,
+    end: date,
+    *,
+    budgets: list[dict],
+    income: int,
+    expense: int,
+    as_of: date | None = None,
+) -> dict:
+    """Compute cycle pacing metrics and safe daily spending allowance."""
+    today_date = as_of or datetime.now(JAKARTA).date()
+    days_total = max(1, (end - start).days + 1)
+    if today_date < start:
+        days_elapsed = 0
+        days_remaining = days_total
+    elif today_date > end:
+        days_elapsed = days_total
+        days_remaining = 0
+    else:
+        days_elapsed = (today_date - start).days + 1
+        days_remaining = (end - today_date).days + 1
+
+    elapsed_percent = round(100 * days_elapsed / days_total)
+    total_budget = sum(b["amount"] for b in budgets)
+    total_budget_spent = sum(b["spent"] for b in budgets)
+    budget_remaining = total_budget - total_budget_spent
+    budget_spent_percent = round(100 * total_budget_spent / total_budget) if total_budget > 0 else 0
+
+    if days_remaining <= 0:
+        safe_daily_allowance = 0
+    elif total_budget > 0:
+        safe_daily_allowance = max(0, budget_remaining) // days_remaining
+    elif income > 0:
+        safe_daily_allowance = max(0, income - expense) // days_remaining
+    else:
+        safe_daily_allowance = 0
+
+    allowance_basis = "budget" if total_budget > 0 else ("income" if income > 0 else "none")
+    if total_budget == 0:
+        pacing_status = "no_budget"
+    elif total_budget_spent > total_budget:
+        pacing_status = "over"
+    elif budget_spent_percent >= 80 or budget_spent_percent >= elapsed_percent + 10:
+        pacing_status = "ahead"
+    else:
+        pacing_status = "on_track"
+
+    return {
+        "as_of": today_date.isoformat(),
+        "days_total": days_total,
+        "days_elapsed": days_elapsed,
+        "days_remaining": days_remaining,
+        "elapsed_percent": elapsed_percent,
+        "total_budget": total_budget,
+        "total_budget_spent": total_budget_spent,
+        "budget_remaining": budget_remaining,
+        "budget_spent_percent": budget_spent_percent,
+        "safe_daily_allowance": safe_daily_allowance,
+        "allowance_basis": allowance_basis,
+        "pacing_status": pacing_status,
+    }
 
 
 def summary(
@@ -120,6 +190,8 @@ def summary(
     accounts_list: list[Account] | None = None,
     categories_list: list[Category] | None = None,
     settings: dict | None = None,
+    balance_as_of: date | None = None,
+    precomputed_balances: dict[str, int | None] | None = None,
 ) -> dict:
     txs = transactions(db, owner_id, start, end)
     cats_list = categories_list if categories_list is not None else list(rows(db, Category, owner_id))
@@ -133,7 +205,7 @@ def summary(
         parts = db.scalars(
             select(Split)
             .join(Transaction, Transaction.id == Split.transaction_id)
-            .where(Transaction.owner_id == owner_id, Transaction.date.between(start, end))
+            .where(Split.owner_id == owner_id, Transaction.owner_id == owner_id, Transaction.date.between(start, end))
         ).all()
         for part in parts:
             splits_by_tx[part.transaction_id].append(part)
@@ -187,6 +259,7 @@ def summary(
 
     span_days = (end - start).days + 1
     prev_summary = None
+    prev_cat_totals: dict[str, int] = {}
     if 1 <= span_days <= 370 and start > date(1971, 1, 1):
         prev_end = start - timedelta(days=1)
         user_settings = settings if settings is not None else get_settings(db, owner_id)
@@ -195,9 +268,44 @@ def summary(
             prev_start, _ = cycle(start_day, prev_end)
         else:
             prev_start = prev_end - timedelta(days=span_days - 1)
-        prev_summary = _period_totals(db, owner_id, prev_start, prev_end)
+        prev_summary, prev_cat_totals = _period_totals_and_categories(db, owner_id, prev_start, prev_end, category_names)
 
-    balances = batch_balances(db, owner_id, accs_list, end)
+    category_deltas = []
+    for name in set(categories_totals) | set(prev_cat_totals):
+        curr_amt = categories_totals.get(name, 0)
+        prev_amt = prev_cat_totals.get(name, 0)
+        if curr_amt == 0 and prev_amt == 0:
+            continue
+        delta = curr_amt - prev_amt
+        pct = round(100 * delta / prev_amt) if prev_amt > 0 else (100 if curr_amt > 0 else 0)
+        category_deltas.append(
+            {
+                "name": name,
+                "current": curr_amt,
+                "previous": prev_amt,
+                "delta": delta,
+                "percent_change": pct,
+            }
+        )
+    category_deltas.sort(key=lambda item: (-abs(item["delta"]), -item["current"], item["name"]))
+    category_deltas = category_deltas[:8]
+
+    budgets_data = list_budgets(db, owner_id, start, end, cats_map=cats_map, spent_by_cat=spent_by_cat)
+    budget_alerts = [b for b in budgets_data if b["status"] in ("warning", "over")]
+    pacing = compute_cycle_pacing(
+        start,
+        end,
+        budgets=budgets_data,
+        income=income,
+        expense=expense,
+        as_of=balance_as_of,
+    )
+
+    balances = (
+        precomputed_balances
+        if precomputed_balances is not None
+        else batch_balances(db, owner_id, accs_list, balance_as_of or end)
+    )
 
     return {
         "start": start,
@@ -209,7 +317,10 @@ def summary(
         "income_categories": [
             {"name": n, "amount": v} for n, v in sorted(income_categories.items(), key=lambda x: -x[1])
         ],
-        "budgets": list_budgets(db, owner_id, start, end, cats_map=cats_map, spent_by_cat=spent_by_cat),
+        "budgets": budgets_data,
+        "budget_alerts": budget_alerts,
+        "pacing": pacing,
+        "category_deltas": category_deltas,
         "previous": prev_summary,
         "reviews": reviews,
         "partial_history": partial_history,

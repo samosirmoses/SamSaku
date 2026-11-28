@@ -20,10 +20,12 @@ def is_test_env() -> bool:
 
 
 def cors_origins() -> list[str]:
-    raw = os.getenv("CORS_ORIGINS", "*").strip()
-    if raw == "*":
-        return ["*"]
+    raw = os.getenv("CORS_ORIGINS", "").strip()
     origins = [item.strip() for item in raw.split(",") if item.strip()]
+    if is_production():
+        if not origins or "*" in origins:
+            raise RuntimeError("CORS_ORIGINS wajib diisi secara eksplisit (tanpa '*') di lingkungan production.")
+        return origins
     return origins or ["*"]
 
 

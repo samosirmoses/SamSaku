@@ -7,13 +7,54 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+REVOKE_PRIVILEGES_SQL = """
+DO $$
+DECLARE
+    tbl RECORD;
+    has_anon BOOLEAN;
+    has_auth BOOLEAN;
+BEGIN
+    SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') INTO has_anon;
+    SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') INTO has_auth;
+    FOR tbl IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+        EXECUTE format('REVOKE ALL ON TABLE public.%I FROM PUBLIC', tbl.tablename);
+        IF has_anon THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM anon', tbl.tablename);
+        END IF;
+        IF has_auth THEN
+            EXECUTE format('REVOKE ALL ON TABLE public.%I FROM authenticated', tbl.tablename);
+        END IF;
+    END LOOP;
+END
+$$;
+""".strip()
+
+
+def _normalize_psql_url(database_url: str | None) -> str | None:
+    if not database_url:
+        return None
+    return database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+def reapply_table_privilege_hardening(database_url: str | None = None, *, runner=subprocess.run) -> None:
+    """Re-apply strict REVOKE ALL table permissions after pg_restore --no-privileges."""
+    cmd = ["psql"]
+    psql_url = _normalize_psql_url(database_url)
+    if psql_url:
+        cmd.append(psql_url)
+    cmd.extend(["-XAt", "-v", "ON_ERROR_STOP=1", "-c", REVOKE_PRIVILEGES_SQL])
+    runner(cmd, check=True)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("save", "restore"))
     parser.add_argument("archive", type=Path)
-    parser.add_argument("--passphrase-stdin", action="store_true",
-                        help="Read a single passphrase from a private pipe for automated backups.")
+    parser.add_argument(
+        "--passphrase-stdin",
+        action="store_true",
+        help="Read a single passphrase from a private pipe for automated backups.",
+    )
     args = parser.parse_args()
     if not os.environ.get("PGDATABASE"):
         parser.error("Set PGDATABASE, PGHOST, PGUSER and an authenticated libpq connection first.")
@@ -32,13 +73,18 @@ def main():
     with TemporaryDirectory() as temp:
         dump = Path(temp) / "ledger.dump"
         if args.action == "save":
-            subprocess.run(["pg_dump", "--format=custom", "--no-owner", "--no-privileges",
-                            "--schema=public", "--file", str(dump)], check=True)
+            subprocess.run(
+                ["pg_dump", "--format=custom", "--no-owner", "--no-privileges", "--schema=public", "--file", str(dump)],
+                check=True,
+            )
             # First encrypt in the archive directory; publish only a complete file.
             with TemporaryDirectory(dir=archive.parent) as destination:
                 encrypted = Path(destination) / "archive.gpg"
-                subprocess.run(gpg + ["--symmetric", "--cipher-algo", "AES256",
-                               "--output", str(encrypted), str(dump)], input=secret, check=True)
+                subprocess.run(
+                    gpg + ["--symmetric", "--cipher-algo", "AES256", "--output", str(encrypted), str(dump)],
+                    input=secret,
+                    check=True,
+                )
                 os.link(encrypted, archive)
         else:
             query = "select count(*) from pg_catalog.pg_tables where schemaname='public'"
@@ -49,9 +95,26 @@ def main():
             # A fresh DB already has a public schema. Exclude that TOC item only.
             toc = subprocess.check_output(["pg_restore", "--list", str(dump)], text=True)
             toc_path = Path(temp) / "restore.list"
-            toc_path.write_text("\n".join(line for line in toc.splitlines() if " SCHEMA - public " not in line), encoding="utf-8")
-            subprocess.run(["pg_restore", "--use-list", str(toc_path), "--single-transaction", "--exit-on-error",
-                            "--no-owner", "--no-privileges", "--dbname", os.environ["PGDATABASE"], str(dump)], check=True)
+            toc_path.write_text(
+                "\n".join(line for line in toc.splitlines() if " SCHEMA - public " not in line),
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "pg_restore",
+                    "--use-list",
+                    str(toc_path),
+                    "--single-transaction",
+                    "--exit-on-error",
+                    "--no-owner",
+                    "--no-privileges",
+                    "--dbname",
+                    os.environ["PGDATABASE"],
+                    str(dump),
+                ],
+                check=True,
+            )
+            reapply_table_privilege_hardening()
     print("Cadangan selesai." if args.action == "save" else "Pemulihan selesai.")
 
 

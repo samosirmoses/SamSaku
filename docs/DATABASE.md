@@ -70,6 +70,7 @@ erDiagram
 | `0003` | `0003_budgets_and_settings.py` | Tabel `user_settings` dan `budgets` + RLS PostgreSQL. |
 | `0004` | `0004_performance_indexes.py` | Composite index performa untuk query cepat pada VPS rendah RAM. |
 | `0005` | `0005_account_number.py` | Menambahkan kolom opsional `account_number VARCHAR(32)` pada tabel `accounts` untuk deteksi otomatis sumber dana & transfer antar dompet. |
+| `0006` | `0006_integrity_constraints.py` | Menambahkan DB-level `CHECK` constraints pada `categories`, `transactions`, `goals`, `reserves`, dan `budgets` (`amount > 0`, `fee >= 0`, `0 <= remaining <= amount`, enum `kind`, transfer dua dompet berbeda, dan anti self-parent). |
 
 ### Index Performa (Migrasi `0004`)
 - `ix_transactions_owner_date` pada `transactions (owner_id, date)` — mempercepat filter rentang siklus di `/v1/bootstrap`, `/v1/summary`, `/v1/transactions`.
@@ -79,6 +80,13 @@ erDiagram
 - `ix_source_events_owner_status_occurred` — mempercepat antrean `/v1/reviews`.
 - `ix_reserves_owner_account` — mempercepat agregasi saldo tercadang per dompet.
 
+### Constraint Integritas Moneter (Migrasi `0006`)
+- `categories`: `ck_categories_kind_valid` (`income`/`expense`), `ck_categories_no_self_parent` (`parent_id IS NULL OR parent_id <> id`).
+- `transactions`: `ck_transactions_amount_positive` (`amount > 0`), `ck_transactions_fee_nonnegative` (`fee >= 0`), `ck_transactions_kind_valid`, `ck_transactions_transfer_accounts` (`to_account_id` wajib terisi dan berbeda dari `account_id` untuk `transfer`).
+- `goals`: `ck_goals_target_positive` (`target > 0`).
+- `reserves`: `ck_reserves_amount_positive` (`amount > 0`), `ck_reserves_remaining_bounds` (`remaining >= 0 AND remaining <= amount`).
+- `budgets`: `ck_budgets_amount_positive` (`amount > 0`).
+
 ---
 
 ## 4. Keamanan Database (Row Level Security)
@@ -87,4 +95,4 @@ Pada PostgreSQL, setiap tabel memiliki:
 - `ALTER TABLE "<name>" ENABLE ROW LEVEL SECURITY`
 - `REVOKE ALL ON TABLE "<name>" FROM PUBLIC` (serta role `anon` dan `authenticated` bila tersedia).
 
-Data hanya bisa diakses melalui backend FastAPI yang memverifikasi identitas pemilik dan memfilter semua query berdasarkan `owner_id`.
+Data hanya bisa diakses melalui backend FastAPI yang memverifikasi identitas pemilik dan memfilter semua query berdasarkan `owner_id`. Saat pemulihan cadangan lewat `python ops/backup.py restore`, skrip otomatis memanggil `reapply_table_privilege_hardening()` (`REVOKE_PRIVILEGES_SQL`) setelah `pg_restore --no-privileges` agar pencabutan hak akses tingkat tabel tetap terjaga.

@@ -10,12 +10,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import models
-from ..schemas import SchemeIn, TransactionIn
+from ..core.db import lock_owner
+from ..schemas import Commit, Preview, SchemeIn, TransactionIn
 from .accounts import balance
-from .jobs import ImportEntry, load_file
+from .jobs import FileJob, ImportEntry, get_job, load_file, load_remote_file, purge_file, purge_remote_file
 from .planning import validate_scheme
 from .transactions import post_transaction
-from .xlsx import KINDS, as_date, inspect, money, norm, scan, template
+from .xlsx import KINDS, WorkbookError, as_date, inspect, money, norm, scan, template
 
 TABLES = {
     "accounts": models.Account,
@@ -108,7 +109,11 @@ def master(db: Session, owner: str, entity: str, v: dict, order: str):
         parent = need(db, owner, entity, v["parent"], values.get("kind") or obj.kind)
         if parent.parent_id or (obj and obj.id == parent.id):
             raise ValueError("Kategori mendukung maksimal dua tingkat.")
-        if obj and db.scalar(select(models.Category.id).where(models.Category.parent_id == obj.id).limit(1)):
+        if obj and db.scalar(
+            select(models.Category.id)
+            .where(models.Category.owner_id == owner, models.Category.parent_id == obj.id)
+            .limit(1)
+        ):
             raise ValueError("Kategori ini memiliki anak dan harus tetap menjadi induk.")
         values["parent_id"] = parent.id
     if entity == "aliases":
@@ -131,7 +136,7 @@ def master(db: Session, owner: str, entity: str, v: dict, order: str):
     return obj, "update" if changes else "duplicate", changes
 
 
-def transaction(db: Session, owner: str, job, row: dict):
+def transaction(db: Session, owner: str, job, row: dict, seen_fingerprints: Counter | None = None):
     v = row["values"]
     credit = money(v.get("credit", 0))
     debit = money(v.get("debit", 0))
@@ -177,20 +182,71 @@ def transaction(db: Session, owner: str, job, row: dict):
     def origin_ref(ref_str: str) -> str:
         return f"{account.id}/{ref_str}"
 
-    ref = origin_ref(v["reference"]) if v.get("reference") else f"file/{job.digest}/{row['sheet']}/{row['row']}"
-    if len(ref) > 500:
-        raise ValueError("Referensi terlalu panjang.")
     txs = select(models.Transaction).where(models.Transaction.owner_id == owner)
     original_id = None
     if kind == "refund":
-        original = db.scalar(
-            txs.where(models.Transaction.source == "excel", models.Transaction.source_ref == origin_ref(v.get("original_ref", "")))
-        )
-        if not original and v.get("original_ref"):
-            original = db.scalar(txs.where(models.Transaction.id == str(v["original_ref"])))
+        orig_ref = str(v.get("original_ref") or "").strip()
+        original = None
+        if orig_ref:
+            original = db.scalar(
+                txs.where(models.Transaction.source == "excel", models.Transaction.source_ref == origin_ref(orig_ref))
+            )
+            if not original:
+                cross_matches = [
+                    cand
+                    for cand in db.scalars(
+                        txs.where(
+                            models.Transaction.source == "excel",
+                            models.Transaction.kind == "expense",
+                            models.Transaction.source_ref.like(f"%/{orig_ref}"),
+                        )
+                    ).all()
+                    if cand.source_ref and cand.source_ref.endswith("/" + orig_ref)
+                ]
+                if len(cross_matches) > 1:
+                    raise ValueError("Referensi asal ditemukan di lebih dari satu dompet. Gunakan ID transaksi.")
+                if len(cross_matches) == 1:
+                    original = cross_matches[0]
+            if not original:
+                prov_matches = db.scalars(
+                    txs.where(
+                        models.Transaction.source.in_(["bca", "gopay", "telegram", "manual", "receipt"]),
+                        models.Transaction.kind == "expense",
+                        models.Transaction.source_ref == orig_ref,
+                    ).limit(2)
+                ).all()
+                if len(prov_matches) == 1:
+                    original = prov_matches[0]
+            if not original:
+                original = db.scalar(txs.where(models.Transaction.id == orig_ref))
         if not original:
             raise ValueError("Refund memerlukan ID transaksi asal atau referensi pembayaran yang sudah diimpor.")
         original_id = original.id
+
+    if v.get("reference"):
+        ref = origin_ref(v["reference"])
+    else:
+        fp_counter = seen_fingerprints if seen_fingerprints is not None else Counter()
+        fp_json = json.dumps(
+            [
+                day.isoformat(),
+                kind,
+                account.id,
+                destination.id if destination else None,
+                amount,
+                fee,
+                description,
+                category.id if category else None,
+                merchant.id if merchant else None,
+                original_id,
+            ],
+            separators=(",", ":"),
+        )
+        occ = fp_counter[fp_json]
+        fp_counter[fp_json] = occ + 1
+        ref = f"row/{hashlib.sha256(fp_json.encode('utf-8')).hexdigest()[:32]}/{occ}"
+    if len(ref) > 500:
+        raise ValueError("Referensi terlalu panjang.")
     payload = TransactionIn(
         kind=kind,
         date=day,
@@ -259,6 +315,7 @@ def evaluate(
 
     rows_data = preloaded_rows if preloaded_rows is not None else scan(load_file(job), plans)
     results, impacts, totals = [], Counter(), Counter()
+    seen_fingerprints: Counter = Counter()
     dates = []
     batch = db.begin_nested()
     try:
@@ -270,7 +327,7 @@ def evaluate(
                 try:
                     with db.begin_nested():
                         if row["entity"] == "transactions":
-                            obj, status, impact, report = transaction(db, owner, job, row)
+                            obj, status, impact, report = transaction(db, owner, job, row, seen_fingerprints)
                             if status == "similar" and apply and key not in accepted:
                                 raise ValueError("Konfirmasi potensi transaksi ganda sebelum menyimpan.")
                             impacts.update(impact)
@@ -334,4 +391,236 @@ def evaluate(
     return result
 
 
-__all__ = ["evaluate", "inspect", "lookup", "master", "need", "scan", "template", "transaction"]
+def import_job(db: Session, user: str, job_id: str, lock: bool = False) -> FileJob:
+    job = get_job(db, user, job_id, lock=lock)
+    if job.kind not in ("transactions", "masters"):
+        raise HTTPException(404, "Impor tidak ditemukan.")
+    return job
+
+
+def list_import_history(db: Session, user: str) -> list[dict]:
+    query = (
+        select(FileJob.id, FileJob.filename, FileJob.kind, FileJob.status, FileJob.created_at)
+        .where(FileJob.owner_id == user, FileJob.kind.in_(["transactions", "masters"]))
+        .order_by(FileJob.created_at.desc())
+        .limit(100)
+    )
+    return [dict(row) for row in db.execute(query).mappings()]
+
+
+def list_import_mappings(db: Session, user: str) -> list[dict]:
+    recent = db.execute(
+        select(FileJob.config)
+        .where(FileJob.owner_id == user, FileJob.config.is_not(None))
+        .order_by(FileJob.created_at.desc())
+        .limit(200)
+    )
+    seen = {}
+    for (config,) in recent:
+        if config.get("mapping_name"):
+            seen.setdefault(
+                config["mapping_name"],
+                {"mapping_name": config["mapping_name"], "sheets": config["sheets"]},
+            )
+    return list(seen.values())
+
+
+def get_import_status(db: Session, user: str, job_id: str) -> dict:
+    job = import_job(db, user, job_id)
+    return {"id": job.id, "status": job.status, "config": job.config, "result": job.result}
+
+
+def import_errors_rows(db: Session, user: str, job_id: str) -> list[list]:
+    job = import_job(db, user, job_id)
+    out = [["Sheet", "Baris", "Status", "Alasan"]]
+    out.extend(
+        [r["sheet"], r["row"], r["status"], r["message"]]
+        for r in (job.result or {}).get("rows", [])
+        if r["status"] in ("error", "similar")
+    )
+    return out
+
+
+def preview_import(db: Session, user: str, job_id: str, body: Preview) -> dict:
+    lock_owner(db, user)
+    job = import_job(db, user, job_id, True)
+    if job.status in ("done", "approved"):
+        raise HTTPException(409, "Batch ini sudah disetujui.")
+    plans = [s.model_dump() for s in body.sheets]
+    if len({p["name"] for p in plans}) != len(plans):
+        raise HTTPException(422, "Setiap sheet hanya boleh dipilih sekali.")
+    if any((p["entity"] == "transactions") != (job.kind == "transactions") for p in plans):
+        raise HTTPException(422, "Jenis sheet harus sesuai dengan jenis impor.")
+    result = evaluate(db, user, job, plans)
+    job.config = body.model_dump()
+    job.result = result
+    job.status = "preview"
+    db.commit()
+    return result
+
+
+def _approval_key(approval: Commit | dict) -> tuple[str, list[tuple[str, int]], list[tuple[str, int]]]:
+    data = approval.model_dump() if isinstance(approval, Commit) else (approval or {})
+    exclude = sorted({(r["sheet"], r["row"]) for r in data.get("exclude") or []})
+    accept_similar = sorted({(r["sheet"], r["row"]) for r in data.get("accept_similar") or []})
+    return str(data.get("revision") or ""), exclude, accept_similar
+
+
+def _execute_import_commit(
+    db: Session,
+    user: str,
+    job: FileJob,
+    approval: Commit,
+    plans: list[dict],
+    raw_bytes: bytes | None = None,
+) -> dict:
+    file_bytes = raw_bytes if raw_bytes is not None else load_file(job)
+    parsed_rows = scan(file_bytes, plans)
+    if evaluate(db, user, job, plans, preloaded_rows=parsed_rows)["revision"] != approval.revision:
+        raise HTTPException(409, "Data berubah sejak ditinjau. Segarkan pratinjau.")
+    result = evaluate(
+        db,
+        user,
+        job,
+        plans,
+        apply=True,
+        excluded={(r.sheet, r.row) for r in approval.exclude},
+        accepted={(r.sheet, r.row) for r in approval.accept_similar},
+        preloaded_rows=parsed_rows,
+    )
+    counts = result["counts"]
+    return {
+        "status": "done",
+        "id": job.id,
+        "counts": counts,
+        "applied": sum(counts.get(k, 0) for k in ("new", "similar", "update")),
+        "skipped": counts.get("duplicate", 0) + counts.get("excluded", 0),
+    }
+
+
+def _cleanup_job_storage(db: Session, user: str, job_id: str, purge_key: str | None) -> None:
+    if not purge_key:
+        return
+    try:
+        purge_remote_file(purge_key)
+        lock_owner(db, user)
+        purged = db.get(FileJob, job_id)
+        if purged and purged.owner_id == user:
+            purged.object_key = None
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def commit_import(db: Session, user: str, job_id: str, body: Commit) -> tuple[dict, bool]:
+    lock_owner(db, user)
+    job = import_job(db, user, job_id, True)
+    if job.status == "done":
+        saved_approval = (job.config or {}).get("approval")
+        if saved_approval is not None and _approval_key(body) != _approval_key(saved_approval):
+            raise HTTPException(409, "Batch impor sudah selesai dengan persetujuan berbeda.")
+        return job.result, False
+    if job.status == "approved":
+        saved_approval = (job.config or {}).get("approval")
+        if saved_approval is not None and _approval_key(body) != _approval_key(saved_approval):
+            raise HTTPException(409, "Batch impor sudah disetujui dengan konfigurasi berbeda.")
+        return publish_approved(db, user, job_id), True
+    if job.status != "preview" or job.result.get("revision") != body.revision:
+        raise HTTPException(409, "Buat pratinjau terbaru sebelum menyimpan.")
+    excluded = {(r.sheet, r.row) for r in body.exclude}
+    accepted = {(r.sheet, r.row) for r in body.accept_similar}
+    for row in job.result["rows"]:
+        key = (row["sheet"], row["row"])
+        if key not in excluded and (row["status"] == "error" or (row["status"] == "similar" and key not in accepted)):
+            raise HTTPException(409, "Selesaikan baris yang perlu ditinjau.")
+
+    raw_bytes = job.data
+    object_key = job.object_key
+    expires_at = job.expires_at
+    if raw_bytes is None:
+        if expires_at < models.job_now():
+            db.rollback()
+            raise HTTPException(410, "File sementara kedaluwarsa. Unggah kembali.")
+        if not object_key:
+            db.rollback()
+            raise HTTPException(410, "File sementara sudah dihapus.")
+        db.rollback()
+        raw_bytes = load_remote_file(object_key)
+        lock_owner(db, user)
+        job = import_job(db, user, job_id, True)
+        if job.status == "done":
+            saved_approval = (job.config or {}).get("approval")
+            if saved_approval is not None and _approval_key(body) != _approval_key(saved_approval):
+                raise HTTPException(409, "Batch impor sudah selesai dengan persetujuan berbeda.")
+            return job.result, False
+        if job.status != "preview" or job.result.get("revision") != body.revision:
+            raise HTTPException(409, "Buat pratinjau terbaru sebelum menyimpan.")
+
+    plans = job.config["sheets"]
+    try:
+        final = _execute_import_commit(db, user, job, body, plans, raw_bytes=raw_bytes)
+        job.config = {**job.config, "approval": body.model_dump()}
+        job.result = final
+        job.status = "done"
+        purge_key = job.object_key
+        job.data = None
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    _cleanup_job_storage(db, user, job_id, purge_key)
+    return final, True
+
+
+def publish_approved(db: Session, user: str, job_id: str) -> dict:
+    lock_owner(db, user)
+    job = import_job(db, user, job_id, True)
+    if job.status == "done":
+        return job.result
+    if job.status != "approved":
+        raise HTTPException(409, "Impor memerlukan persetujuan.")
+    approval = Commit.model_validate(job.config["approval"])
+    plans = job.config["sheets"]
+    try:
+        final = _execute_import_commit(db, user, job, approval, plans)
+        job.result = final
+        job.status = "done"
+        purge_key = job.object_key
+        job.data = None
+        db.commit()
+    except (HTTPException, WorkbookError):
+        db.rollback()
+        lock_owner(db, user)
+        reverted = import_job(db, user, job_id, True)
+        if reverted.status == "approved":
+            reverted.status = "preview"
+            reverted.config = {k: v for k, v in reverted.config.items() if k != "approval"}
+            db.commit()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+    _cleanup_job_storage(db, user, job_id, purge_key)
+    return final
+
+
+__all__ = [
+    "commit_import",
+    "evaluate",
+    "get_import_status",
+    "import_errors_rows",
+    "import_job",
+    "inspect",
+    "list_import_history",
+    "list_import_mappings",
+    "lookup",
+    "master",
+    "need",
+    "preview_import",
+    "publish_approved",
+    "scan",
+    "template",
+    "transaction",
+]

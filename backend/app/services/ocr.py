@@ -12,12 +12,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.config import JAKARTA, gemini_api_key, gemini_model, is_test_env
+from ..core.db import lock_owner
 from ..core.http_client import get_http_client
 from ..models import Account, Category, Evidence, Transaction
-from .jobs import get_job, load_file, purge_file, store_file
+from ..schemas import ConfirmReceipt
+from .common import owned
+from .jobs import get_job, load_remote_file, now, purge_remote_file, store_file
 from .receipt_matching import format_receipt_description, resolve_receipt_classification
 from .receipt_text import extract, infer_category
 from .settings import get_settings
+from .transactions import post_transaction, transaction_matches_input
 
 logger = logging.getLogger("samsaku.ocr")
 
@@ -155,7 +159,7 @@ def _scan_with_gemini(
                 "responseMimeType": "application/json",
             },
         }
-        res = get_http_client().post(url, params={"key": api_key}, json=payload, timeout=25.0)
+        res = get_http_client().post(url, headers={"x-goog-api-key": api_key}, json=payload, timeout=25.0)
         if res.status_code != 200:
             logger.warning("Gemini Vision API returned %s: %s", res.status_code, res.text[:250])
             return None
@@ -268,10 +272,10 @@ def _enrich_category(
     return cat_id, cat_name
 
 
-def _analyze_receipt(
+def _build_receipt_result(
     db: Session,
     owner_id: str,
-    content: bytes,
+    ai_res: dict,
     caption_account_id: str | None = None,
     caption_note: str | None = None,
 ) -> tuple[dict, str]:
@@ -279,29 +283,8 @@ def _analyze_receipt(
         {"id": c.id, "name": c.name, "kind": c.kind, "archived": c.archived}
         for c in db.scalars(select(Category).where(Category.owner_id == owner_id)).all()
     ]
-    expense_cat_names = [c["name"] for c in all_cats if c["kind"] == "expense" and not c["archived"]]
-    income_cat_names = [c["name"] for c in all_cats if c["kind"] == "income" and not c["archived"]]
     accounts = list(db.scalars(select(Account).where(Account.owner_id == owner_id)).all())
-    account_names = [a.name for a in accounts]
     default_account_id = get_settings(db, owner_id).get("default_account_id")
-
-    ai_res = _scan_with_gemini(
-        content,
-        expense_cat_names,
-        account_names,
-        income_category_names=income_cat_names,
-        extra_context=caption_note,
-    )
-    if not ai_res:
-        if not gemini_api_key():
-            raise HTTPException(
-                503,
-                "Scan struk memerlukan GEMINI_API_KEY pada konfigurasi server (OCR lokal dinonaktifkan agar hemat RAM).",
-            )
-        raise HTTPException(
-            503,
-            "Gemini Vision belum berhasil membaca struk ini. Coba foto ulang yang lebih jelas atau isi manual.",
-        )
 
     resolved = resolve_receipt_classification(
         ai_res=ai_res,
@@ -345,11 +328,48 @@ def _analyze_receipt(
     return result, ai_res.get("raw_text", "")
 
 
+def _call_gemini_for_receipt(
+    content: bytes,
+    expense_cat_names: list[str],
+    income_cat_names: list[str],
+    account_names: list[str],
+    extra_context: str | None = None,
+) -> dict:
+    ai_res = _scan_with_gemini(
+        content,
+        expense_cat_names,
+        account_names,
+        income_category_names=income_cat_names,
+        extra_context=extra_context,
+    )
+    if not ai_res:
+        if not gemini_api_key():
+            raise HTTPException(
+                503,
+                "Scan struk memerlukan GEMINI_API_KEY pada konfigurasi server (OCR lokal dinonaktifkan agar hemat RAM).",
+            )
+        raise HTTPException(
+            503,
+            "Gemini Vision belum berhasil membaca struk ini. Coba foto ulang yang lebih jelas atau isi manual.",
+        )
+    return ai_res
+
+
 def scan_receipt_auto(db: Session, owner_id: str, filename: str, content: bytes) -> dict:
     """Directly scan a receipt image with Gemini Vision to auto-fill transaction fields."""
     with open_image(content) as im:
         im.verify()
-    enriched, text = _analyze_receipt(db, owner_id, content)
+    all_cats = [
+        {"name": c.name, "kind": c.kind, "archived": c.archived}
+        for c in db.scalars(select(Category).where(Category.owner_id == owner_id)).all()
+    ]
+    expense_cat_names = [c["name"] for c in all_cats if c["kind"] == "expense" and not c["archived"]]
+    income_cat_names = [c["name"] for c in all_cats if c["kind"] == "income" and not c["archived"]]
+    account_names = [a.name for a in db.scalars(select(Account).where(Account.owner_id == owner_id)).all()]
+    db.rollback()
+
+    ai_res = _call_gemini_for_receipt(content, expense_cat_names, income_cat_names, account_names)
+    enriched, text = _build_receipt_result(db, owner_id, ai_res)
     fallback_name = filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip() or "Belanja"
     return {
         "kind": enriched["kind"],
@@ -381,15 +401,74 @@ def process_receipt(
     caption_account_id: str | None = None,
     caption_note: str | None = None,
 ) -> dict:
+    # Phase 1: short lock to validate, snapshot inputs, and mark processing lease.
+    lock_owner(db, owner_id)
     job = get_job(db, owner_id, job_id, lock=True)
     if job.kind != "receipt":
+        db.rollback()
         raise HTTPException(404, "Struk tidak ditemukan.")
     if job.status in ("review", "done"):
-        return {"id": job.id, "status": job.status, **job.result}
-    result, _ = _analyze_receipt(
+        result_copy = dict(job.result or {})
+        status = job.status
+        db.commit()
+        return {"id": job.id, "status": status, **result_copy}
+    if job.status == "processing":
+        db.rollback()
+        raise HTTPException(409, "Struk sedang diproses. Coba beberapa saat lagi.")
+    if job.expires_at < now():
+        db.rollback()
+        raise HTTPException(410, "File sementara kedaluwarsa. Unggah kembali.")
+    raw_data = job.data
+    object_key = job.object_key
+    if raw_data is None and not object_key:
+        db.rollback()
+        raise HTTPException(410, "File sementara sudah dihapus.")
+
+    all_cats = [
+        {"name": c.name, "kind": c.kind, "archived": c.archived}
+        for c in db.scalars(select(Category).where(Category.owner_id == owner_id)).all()
+    ]
+    expense_cat_names = [c["name"] for c in all_cats if c["kind"] == "expense" and not c["archived"]]
+    income_cat_names = [c["name"] for c in all_cats if c["kind"] == "income" and not c["archived"]]
+    account_names = [a.name for a in db.scalars(select(Account).where(Account.owner_id == owner_id)).all()]
+    job.status = "processing"
+    db.commit()
+
+    # Phase 2: execute external HTTP I/O (storage fetch + Gemini Vision) without any DB lock/transaction.
+    try:
+        content = raw_data if raw_data is not None else load_remote_file(object_key)
+        ai_res = _call_gemini_for_receipt(
+            content,
+            expense_cat_names,
+            income_cat_names,
+            account_names,
+            extra_context=caption_note,
+        )
+    except BaseException:
+        db.rollback()
+        try:
+            lock_owner(db, owner_id)
+            failed_job = get_job(db, owner_id, job_id, lock=True)
+            if failed_job.status == "processing":
+                failed_job.status = "uploaded"
+                db.commit()
+        except Exception:
+            db.rollback()
+        raise
+
+    # Phase 3: re-acquire lock for fast DB write.
+    lock_owner(db, owner_id)
+    job = get_job(db, owner_id, job_id, lock=True)
+    if job.status in ("review", "done"):
+        result_copy = dict(job.result or {})
+        status = job.status
+        db.commit()
+        return {"id": job.id, "status": status, **result_copy}
+
+    result, _ = _build_receipt_result(
         db,
         owner_id,
-        load_file(job),
+        ai_res,
         caption_account_id=caption_account_id,
         caption_note=caption_note,
     )
@@ -422,14 +501,65 @@ def process_receipt(
     db.add(evidence)
     db.flush()
     result["evidence_id"] = evidence.id
+    purge_key = job.object_key
     job.result, job.status = result, "review"
+    job.data = None
     db.commit()
-    try:
-        purge_file(job)
-        db.commit()
-    except Exception:
-        db.rollback()
-    return {"id": job.id, "status": job.status, **result}
+
+    if purge_key:
+        try:
+            purge_remote_file(purge_key)
+            lock_owner(db, owner_id)
+            purged_job = get_job(db, owner_id, job_id, lock=True)
+            purged_job.object_key = None
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    return {"id": job.id, "status": "review", **result}
+
+
+def confirm_receipt_job(db: Session, owner_id: str, job_id: str, body: ConfirmReceipt) -> tuple[dict, bool]:
+    if bool(body.transaction) == bool(body.transaction_id):
+        raise HTTPException(422, "Tautkan ke satu transaksi atau isi draf baru.")
+    lock_owner(db, owner_id)
+    job = get_job(db, owner_id, job_id, lock=True)
+    if job.kind != "receipt":
+        raise HTTPException(404, "Struk tidak ditemukan.")
+    if job.status == "done":
+        tx_id = (job.result or {}).get("transaction_id")
+        if body.transaction_id and tx_id == body.transaction_id:
+            return job.result, False
+        if body.transaction and tx_id:
+            existing_tx = db.get(Transaction, tx_id)
+            if (
+                existing_tx
+                and existing_tx.owner_id == owner_id
+                and existing_tx.source == "receipt"
+                and existing_tx.source_ref == job.id
+                and transaction_matches_input(db, owner_id, existing_tx, body.transaction)
+            ):
+                return job.result, False
+        raise HTTPException(409, "Struk sudah dikonfirmasi dengan transaksi berbeda.")
+    if job.status != "review":
+        raise HTTPException(422, "Tautkan ke satu transaksi atau isi draf baru.")
+    evidence = owned(db, Evidence, owner_id, job.result["evidence_id"])
+    if evidence.transaction_id:
+        tx = owned(db, Transaction, owner_id, evidence.transaction_id)
+    elif evidence.status != "review":
+        raise HTTPException(409, "Bukti sudah diselesaikan.")
+    elif body.transaction:
+        tx = post_transaction(db, owner_id, body.transaction, source="receipt", source_ref=job.id)
+        evidence.transaction_id, evidence.status = tx.id, "posted"
+    else:
+        tx = owned(db, Transaction, owner_id, body.transaction_id)
+        evidence.transaction_id, evidence.status = tx.id, "linked"
+    if evidence.status == "review":
+        evidence.transaction_id, evidence.status = tx.id, "linked"
+    job.result = {**job.result, "transaction_id": tx.id}
+    job.status = "done"
+    db.commit()
+    return job.result, True
 
 
 __all__ = [
@@ -437,6 +567,7 @@ __all__ = [
     "_parse_iso_date",
     "_parse_positive_int",
     "_scan_with_gemini",
+    "confirm_receipt_job",
     "create_receipt",
     "extract",
     "open_image",

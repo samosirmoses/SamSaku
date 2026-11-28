@@ -2,15 +2,27 @@
 import asyncio
 import json
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from .auth import verify_owner
+from .config import cors_origins
 
 logger = logging.getLogger("samsaku.realtime")
 router = APIRouter()
+
+
+def max_ws_per_owner() -> int:
+    raw = os.getenv("SAMSAKU_WS_MAX_PER_OWNER", "5").strip()
+    return max(1, int(raw)) if raw.isdigit() else 5
+
+
+def max_ws_global() -> int:
+    raw = os.getenv("SAMSAKU_WS_MAX_GLOBAL", "50").strip()
+    return max(1, int(raw)) if raw.isdigit() else 50
 
 
 class RealtimeHub:
@@ -21,8 +33,22 @@ class RealtimeHub:
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
-    def add(self, owner_id: str, ws: WebSocket) -> None:
-        self._clients[owner_id].add(ws)
+    def total_connections(self) -> int:
+        return sum(len(sockets) for sockets in self._clients.values())
+
+    def connect(self, owner_id: str, ws: WebSocket) -> bool:
+        owner_sockets = self._clients[owner_id]
+        if ws in owner_sockets:
+            return True
+        if len(owner_sockets) >= max_ws_per_owner():
+            return False
+        if self.total_connections() >= max_ws_global():
+            return False
+        owner_sockets.add(ws)
+        return True
+
+    def add(self, owner_id: str, ws: WebSocket) -> bool:
+        return self.connect(owner_id, ws)
 
     def remove(self, owner_id: str, ws: WebSocket) -> None:
         sockets = self._clients.get(owner_id)
@@ -84,23 +110,32 @@ async def realtime_ws(ws: WebSocket):
     await ws.accept()
     owner_id: str | None = None
     try:
-        q_dev = ws.query_params.get("dev_token", "")
-        q_bearer = ws.query_params.get("token", "")
-        if q_dev or q_bearer:
-            auth_header = f"Bearer {q_bearer}" if q_bearer else ""
-            owner_id = verify_owner(authorization=auth_header, x_dev_token=q_dev)
-        else:
-            raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
-            msg = json.loads(raw)
-            if not isinstance(msg, dict) or msg.get("type") != "auth":
-                await ws.close(code=4401)
+        allowed_origins = cors_origins()
+        origin = (ws.headers.get("origin") or "").strip().rstrip("/")
+        if allowed_origins != ["*"] and origin:
+            normalized = {o.rstrip("/") for o in allowed_origins}
+            if origin not in normalized:
+                await ws.close(code=4403, reason="Origin tidak diizinkan.")
                 return
-            token = str(msg.get("token") or "")
-            dev_token = str(msg.get("dev_token") or "")
-            auth_header = f"Bearer {token}" if token else ""
-            owner_id = verify_owner(authorization=auth_header, x_dev_token=dev_token)
 
-        hub.add(owner_id, ws)
+        if ws.query_params.get("token") or ws.query_params.get("dev_token"):
+            await ws.close(code=4401)
+            return
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+        msg = json.loads(raw)
+        if not isinstance(msg, dict) or msg.get("type") != "auth":
+            await ws.close(code=4401)
+            return
+        token = str(msg.get("token") or "")
+        dev_token = str(msg.get("dev_token") or "")
+        auth_header = f"Bearer {token}" if token else ""
+        owner_id = verify_owner(authorization=auth_header, x_dev_token=dev_token)
+
+        if not hub.connect(owner_id, ws):
+            owner_id = None
+            await ws.close(code=4429, reason="Terlalu banyak koneksi aktif.")
+            return
+
         await ws.send_json({"type": "connected"})
 
         while True:

@@ -1604,7 +1604,7 @@
     },
     "/v1/categories": {
       "get": {
-        "operationId": "list_categories_v1_categories_get",
+        "operationId": "list_categories_route_v1_categories_get",
         "parameters": [
           {
             "in": "header",
@@ -1647,7 +1647,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Categories",
+        "summary": "List Categories Route",
         "tags": [
           "categories"
         ]
@@ -2133,6 +2133,61 @@
           }
         },
         "summary": "Create Goal",
+        "tags": [
+          "planning"
+        ]
+      }
+    },
+    "/v1/goals/{key}": {
+      "delete": {
+        "operationId": "delete_goal_v1_goals__key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-dev-token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Dev-Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Goal",
         "tags": [
           "planning"
         ]
@@ -3735,6 +3790,22 @@
       "post": {
         "operationId": "add_tx_v1_transactions_post",
         "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",

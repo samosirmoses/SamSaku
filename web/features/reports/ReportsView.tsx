@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { ArrowDownToLine, Download, FileText } from "lucide-react";
 import { ErrorNote, Field } from "../../components/ui";
 import { download, get, saveBlob } from "../../lib/api";
+import { buildCsvRows } from "../../lib/csv";
 import { type Data, type Summary, kindLabels, money, period, shortDate } from "../../lib/domain";
 
 export function ReportsView({
@@ -75,29 +76,19 @@ export function ReportsView({
                 if (format === "pdf") {
                     window.print();
                 } else {
-                    const lines = [
+                    const csvContent = buildCsvRows(
                         ["Tanggal", "Jenis", "Dompet", "Keterangan", "Kategori", "Nominal (IDR)"],
-                        ...(summary?.transactions || []).map(t => [
+                        (summary?.transactions || []).map(t => [
                             t.date,
                             kindLabels[t.kind],
                             t.account_name || "",
                             t.description || "",
                             t.category_name || "",
                             t.amount,
-                        ]),
-                    ];
+                        ])
+                    );
                     saveBlob(
-                        new Blob(
-                            [
-                                "\uFEFF" +
-                                    lines
-                                        .map(row =>
-                                            row.map(v => '"' + String(v).replaceAll('"', '""') + '"').join(",")
-                                        )
-                                        .join("\r\n"),
-                            ],
-                            { type: "text/csv;charset=utf-8" }
-                        ),
+                        new Blob([csvContent], { type: "text/csv;charset=utf-8" }),
                         `SamSaku_${start}_${end}.csv`
                     );
                 }

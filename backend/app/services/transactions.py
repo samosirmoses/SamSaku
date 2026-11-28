@@ -7,32 +7,69 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from ..core.db import lock_owner
-from ..models import Account, Category, Entry, Evidence, Merchant, Reserve, ReserveMovement, Split, Transaction
+from ..models import Account, Allocation, Category, Entry, Evidence, Merchant, Reserve, ReserveMovement, Split, Transaction
 from ..schemas import TransactionIn
 from .accounts import active_reserves
 from .common import columns, fail, owned, rows
 
 
 def splits(db: Session, tx: Transaction) -> list[Split]:
-    return list(db.scalars(select(Split).where(Split.transaction_id == tx.id)).all())
+    return list(db.scalars(select(Split).where(Split.owner_id == tx.owner_id, Split.transaction_id == tx.id)).all())
+
+
+def _reverse_reserve_movements(db: Session, owner_id: str, tx_id: str) -> None:
+    """Reverse reserve consumption/restoration recorded for a transaction before deleting movements."""
+    movements = list(
+        db.scalars(
+            select(ReserveMovement).where(
+                ReserveMovement.owner_id == owner_id,
+                ReserveMovement.transaction_id == tx_id,
+            )
+        ).all()
+    )
+    if not movements:
+        return
+    for mv in movements:
+        reserve = db.get(Reserve, mv.reserve_id)
+        if reserve and reserve.owner_id == owner_id:
+            reserve.remaining = max(0, min(reserve.amount, reserve.remaining + mv.amount))
+    db.execute(
+        delete(ReserveMovement).where(
+            ReserveMovement.owner_id == owner_id,
+            ReserveMovement.transaction_id == tx_id,
+        )
+    )
 
 
 def restore_reserves(db: Session, tx: Transaction, cat: str, amount: int) -> None:
     """Restore only the original expense's still-open, same-wallet reservations."""
     original_or_refunds = select(Transaction.id).where(
-        (Transaction.id == tx.original_id) | (Transaction.original_id == tx.original_id)
+        Transaction.owner_id == tx.owner_id,
+        (Transaction.id == tx.original_id) | (Transaction.original_id == tx.original_id),
     )
     outstanding = db.execute(
         select(ReserveMovement.reserve_id, func.sum(ReserveMovement.amount))
-        .where(ReserveMovement.transaction_id.in_(original_or_refunds), ReserveMovement.category_id == cat)
+        .where(
+            ReserveMovement.owner_id == tx.owner_id,
+            ReserveMovement.transaction_id.in_(original_or_refunds),
+            ReserveMovement.category_id == cat,
+        )
         .group_by(ReserveMovement.reserve_id)
         .order_by(ReserveMovement.reserve_id)
     ).all()
     for reserve_id, consumed in outstanding:
         reserve = db.get(Reserve, reserve_id)
-        if not reserve or consumed <= 0 or reserve.account_id != tx.account_id or (reserve.expires and reserve.expires <= tx.date):
+        if (
+            not reserve
+            or reserve.owner_id != tx.owner_id
+            or consumed <= 0
+            or reserve.account_id != tx.account_id
+            or (reserve.expires and reserve.expires <= tx.date)
+        ):
             continue
-        take = min(int(consumed), amount)
+        take = min(int(consumed), amount, max(0, reserve.amount - reserve.remaining))
+        if take <= 0:
+            continue
         reserve.remaining += take
         db.add(
             ReserveMovement(
@@ -72,7 +109,8 @@ def refund_portions(
         fail("Pengembalian harus merujuk ke pengeluaran sebelum atau pada tanggal refund.")
 
     tx_ids_q = select(Transaction.id).where(
-        (Transaction.id == original.id) | (Transaction.original_id == original.id)
+        Transaction.owner_id == owner_id,
+        (Transaction.id == original.id) | (Transaction.original_id == original.id),
     )
     if exclude_tx_id:
         tx_ids_q = tx_ids_q.where(Transaction.id != exclude_tx_id)
@@ -82,7 +120,7 @@ def refund_portions(
     if tx_ids:
         for cat_id, total in db.execute(
             select(Split.category_id, func.sum(Split.amount))
-            .where(Split.transaction_id.in_(tx_ids))
+            .where(Split.owner_id == owner_id, Split.transaction_id.in_(tx_ids))
             .group_by(Split.category_id)
         ).all():
             available[cat_id] += int(total or 0)
@@ -173,13 +211,46 @@ def _write_entries_and_splits(
             restore_reserves(db, tx, cat, -amt)
 
 
-def post_transaction(
+def transaction_matches_input(db: Session, owner_id: str, existing: Transaction, data: TransactionIn) -> bool:
+    keys = (
+        "date",
+        "kind",
+        "account_id",
+        "amount",
+        "to_account_id",
+        "fee",
+        "description",
+        "merchant_id",
+        "original_id",
+        "category_id",
+    )
+    if any(getattr(data, key) != getattr(existing, key) for key in keys):
+        return False
+    actual = sorted((s.category_id or "", abs(s.amount)) for s in splits(db, existing))
+    if data.splits or data.kind in ("income", "expense"):
+        expected = sorted((s.category_id or "", s.amount) for s in data.splits) or [
+            (data.category_id or "", data.amount)
+        ]
+        return expected == actual
+    if data.kind == "refund":
+        if data.category_id is not None:
+            return [(data.category_id, data.amount)] == actual
+        try:
+            computed = refund_portions(db, owner_id, data, [(None, data.amount)], exclude_tx_id=existing.id)
+        except HTTPException:
+            return False
+        expected = sorted((cat_id or "", amt) for cat_id, amt in computed)
+        return expected == actual
+    return True
+
+
+def post_transaction_with_status(
     db: Session,
     owner_id: str,
     data: TransactionIn,
     source: str = "manual",
     source_ref: str | None = None,
-) -> Transaction:
+) -> tuple[Transaction, bool]:
     lock_owner(db, owner_id)
     reference = source_ref or data.source_ref or None
     if reference:
@@ -191,28 +262,9 @@ def post_transaction(
             )
         )
         if existing:
-            keys = (
-                "date",
-                "kind",
-                "account_id",
-                "amount",
-                "to_account_id",
-                "fee",
-                "description",
-                "merchant_id",
-                "original_id",
-                "category_id",
-            )
-            if any(getattr(data, key) != getattr(existing, key) for key in keys):
+            if not transaction_matches_input(db, owner_id, existing, data):
                 raise HTTPException(409, "Referensi sudah digunakan untuk transaksi berbeda.")
-            if data.splits or data.kind in ("income", "expense"):
-                expected = sorted((s.category_id or "", s.amount) for s in data.splits) or [
-                    (data.category_id or "", data.amount)
-                ]
-                actual = sorted((s.category_id or "", abs(s.amount)) for s in splits(db, existing))
-                if expected != actual:
-                    raise HTTPException(409, "Referensi sudah digunakan dengan rincian kategori lain.")
-            return existing
+            return existing, False
     portions = _validate_and_prepare_tx(db, owner_id, data)
     tx = Transaction(
         owner_id=owner_id,
@@ -224,7 +276,71 @@ def post_transaction(
     db.flush()
     _write_entries_and_splits(db, owner_id, tx, data, portions)
     db.flush()
-    return tx
+    return tx, True
+
+
+def post_transaction(
+    db: Session,
+    owner_id: str,
+    data: TransactionIn,
+    source: str = "manual",
+    source_ref: str | None = None,
+) -> Transaction:
+    return post_transaction_with_status(db, owner_id, data, source=source, source_ref=source_ref)[0]
+
+
+def _validate_parent_expense_update(
+    db: Session,
+    owner_id: str,
+    tx: Transaction,
+    data: TransactionIn,
+    portions: list[tuple[str | None, int]],
+) -> None:
+    child_refunds = list(
+        db.scalars(
+            select(Transaction).where(Transaction.owner_id == owner_id, Transaction.original_id == tx.id)
+        ).all()
+    )
+    if not child_refunds:
+        return
+    if data.kind != "expense":
+        raise HTTPException(409, "Pengeluaran yang memiliki refund tidak dapat diubah jenisnya.")
+    if any(r.date < data.date for r in child_refunds):
+        raise HTTPException(409, "Tanggal pengeluaran tidak boleh setelah tanggal refund yang tertaut.")
+    refunded_by_cat: dict[str | None, int] = defaultdict(int)
+    for cat_id, total in db.execute(
+        select(Split.category_id, func.sum(func.abs(Split.amount)))
+        .where(Split.owner_id == owner_id, Split.transaction_id.in_([r.id for r in child_refunds]))
+        .group_by(Split.category_id)
+    ).all():
+        refunded_by_cat[cat_id] += int(total or 0)
+    new_by_cat: dict[str | None, int] = defaultdict(int)
+    for cat_id, amt in portions:
+        new_by_cat[cat_id] += amt
+    if sum(refunded_by_cat.values()) > data.amount or any(
+        refunded_amt > new_by_cat.get(cat_id, 0) for cat_id, refunded_amt in refunded_by_cat.items()
+    ):
+        raise HTTPException(409, "Nominal atau kategori baru lebih kecil dari refund yang sudah tertaut.")
+
+
+def _validate_allocated_income_update(db: Session, owner_id: str, tx: Transaction, data: TransactionIn) -> None:
+    linked_reserves = list(
+        db.scalars(select(Reserve).where(Reserve.owner_id == owner_id, Reserve.income_id == tx.id)).all()
+    )
+    if not linked_reserves:
+        return
+    total_allocated = sum(r.amount for r in linked_reserves)
+    if data.kind != "income" or data.account_id != tx.account_id or data.amount < total_allocated:
+        raise HTTPException(
+            409,
+            "Pemasukan yang sudah dialokasikan ke pos cadangan tidak dapat diubah jenis, dompet, atau nominal di bawah alokasi.",
+        )
+    app_ids = list({r.application_id for r in linked_reserves})
+    earliest_alloc_date = db.scalar(
+        select(func.min(Allocation.date)).where(Allocation.owner_id == owner_id, Allocation.id.in_(app_ids))
+    )
+    if earliest_alloc_date and data.date > earliest_alloc_date:
+        raise HTTPException(409, "Tanggal pemasukan tidak boleh setelah tanggal penerapan alokasi cadangan.")
 
 
 def update_transaction(db: Session, owner_id: str, key: str, data: TransactionIn) -> Transaction:
@@ -233,9 +349,11 @@ def update_transaction(db: Session, owner_id: str, key: str, data: TransactionIn
     if data.original_id == tx.id:
         fail("Transaksi tidak dapat merujuk dirinya sendiri.")
     portions = _validate_and_prepare_tx(db, owner_id, data, exclude_tx_id=tx.id)
-    db.execute(delete(Entry).where(Entry.transaction_id == tx.id))
-    db.execute(delete(Split).where(Split.transaction_id == tx.id))
-    db.execute(delete(ReserveMovement).where(ReserveMovement.transaction_id == tx.id))
+    _validate_parent_expense_update(db, owner_id, tx, data, portions)
+    _validate_allocated_income_update(db, owner_id, tx, data)
+    _reverse_reserve_movements(db, owner_id, tx.id)
+    db.execute(delete(Entry).where(Entry.owner_id == owner_id, Entry.transaction_id == tx.id))
+    db.execute(delete(Split).where(Split.owner_id == owner_id, Split.transaction_id == tx.id))
     for field, value in data.model_dump(exclude={"source_ref", "splits"}).items():
         setattr(tx, field, value)
     db.flush()
@@ -244,21 +362,46 @@ def update_transaction(db: Session, owner_id: str, key: str, data: TransactionIn
     return tx
 
 
-def remove_transaction_records(db: Session, owner_id: str, tx: Transaction) -> None:
+def remove_transaction_records(
+    db: Session,
+    owner_id: str,
+    tx: Transaction,
+    *,
+    allow_cascade_reserves: bool = False,
+) -> None:
+    has_refund = db.scalar(
+        select(Transaction.id)
+        .where(Transaction.owner_id == owner_id, Transaction.original_id == tx.id)
+        .limit(1)
+    )
+    if has_refund:
+        raise HTTPException(409, "Hapus transaksi refund yang tertaut terlebih dahulu sebelum menghapus pengeluaran asal.")
+    linked_reserve_ids = list(
+        db.scalars(select(Reserve.id).where(Reserve.owner_id == owner_id, Reserve.income_id == tx.id)).all()
+    )
+    if linked_reserve_ids:
+        if not allow_cascade_reserves:
+            raise HTTPException(409, "Pemasukan yang sudah dialokasikan ke pos cadangan tidak dapat dihapus.")
+        db.execute(
+            delete(ReserveMovement).where(
+                ReserveMovement.owner_id == owner_id,
+                ReserveMovement.reserve_id.in_(linked_reserve_ids),
+            )
+        )
+        db.execute(
+            delete(Reserve).where(
+                Reserve.owner_id == owner_id,
+                Reserve.id.in_(linked_reserve_ids),
+            )
+        )
+    _reverse_reserve_movements(db, owner_id, tx.id)
     db.execute(
         update(Evidence)
         .where(Evidence.owner_id == owner_id, Evidence.transaction_id == tx.id)
         .values(transaction_id=None)
     )
-    db.execute(
-        update(Transaction)
-        .where(Transaction.owner_id == owner_id, Transaction.original_id == tx.id)
-        .values(original_id=None)
-    )
-    db.execute(delete(ReserveMovement).where(ReserveMovement.transaction_id == tx.id))
-    db.execute(delete(Reserve).where(Reserve.income_id == tx.id))
-    db.execute(delete(Entry).where(Entry.transaction_id == tx.id))
-    db.execute(delete(Split).where(Split.transaction_id == tx.id))
+    db.execute(delete(Entry).where(Entry.owner_id == owner_id, Entry.transaction_id == tx.id))
+    db.execute(delete(Split).where(Split.owner_id == owner_id, Split.transaction_id == tx.id))
     db.delete(tx)
 
 
@@ -287,7 +430,7 @@ def serialize_transactions(
     if splits_by_tx is None:
         tx_ids = [tx.id for tx in txs]
         splits_by_tx = defaultdict(list)
-        for s in db.scalars(select(Split).where(Split.transaction_id.in_(tx_ids))).all():
+        for s in db.scalars(select(Split).where(Split.owner_id == owner_id, Split.transaction_id.in_(tx_ids))).all():
             splits_by_tx[s.transaction_id].append(s)
 
     result = []

@@ -1,4 +1,6 @@
 """User cycle/wallet settings and billing-cycle date range resolution."""
+import logging
+import re
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 
@@ -30,6 +32,9 @@ from ..models import (
 from ..schemas import DataResetIn, SettingsIn
 from .calculations import cycle
 from .common import owned
+from .jobs import purge_remote_file
+
+logger = logging.getLogger("samsaku.settings")
 
 
 def get_settings(db: Session, owner_id: str) -> dict:
@@ -109,6 +114,8 @@ def cycle_month_for_date(day: date, start_day: int = 1) -> str:
 
 
 def period_for_month(month: str, start_day: int = 1) -> tuple[date, date]:
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+        raise ValueError("Format bulan harus YYYY-MM dengan bulan 01–12.")
     y, m = map(int, month.split("-"))
     clamped = max(1, min(31, start_day or 1))
     if clamped == 1:
@@ -161,7 +168,24 @@ def reset_owner_data(db: Session, owner_id: str, data: DataResetIn) -> dict:
         res = db.execute(delete(model).where(model.owner_id == owner_id))
         return int(res.rowcount or 0)
 
+    def _purge_external_keys(keys: list[str]) -> None:
+        for obj_key in keys:
+            for attempt in range(2):
+                try:
+                    purge_remote_file(obj_key)
+                    break
+                except Exception as exc:
+                    if attempt == 1:
+                        logger.warning("Failed to purge remote object %s after reset: %s", obj_key, exc)
+
     if data.mode == "wipe":
+        object_keys = [
+            k
+            for k in db.scalars(
+                select(FileJob.object_key).where(FileJob.owner_id == owner_id, FileJob.object_key.is_not(None))
+            )
+            if k
+        ]
         job_ids = list(db.scalars(select(FileJob.id).where(FileJob.owner_id == owner_id)))
         if job_ids:
             db.execute(delete(ImportEntry).where(ImportEntry.job_id.in_(job_ids)))
@@ -183,10 +207,19 @@ def reset_owner_data(db: Session, owner_id: str, data: DataResetIn) -> dict:
         db.execute(update(Category).where(Category.owner_id == owner_id).values(parent_id=None))
         deleted["categories"] = _del(Category)
         deleted["accounts"] = _del(Account)
-        db.flush()
+        db.commit()
+        _purge_external_keys(object_keys)
         return {"mode": "wipe", "deleted": deleted, "zeroed_accounts": zeroed_accounts}
 
+    object_keys: list[str] = []
     if data.clear_evidence:
+        object_keys = [
+            k
+            for k in db.scalars(
+                select(FileJob.object_key).where(FileJob.owner_id == owner_id, FileJob.object_key.is_not(None))
+            )
+            if k
+        ]
         job_ids = list(db.scalars(select(FileJob.id).where(FileJob.owner_id == owner_id)))
         if job_ids:
             db.execute(delete(ImportEntry).where(ImportEntry.job_id.in_(job_ids)))
@@ -219,5 +252,7 @@ def reset_owner_data(db: Session, owner_id: str, data: DataResetIn) -> dict:
     if data.clear_budgets:
         deleted["budgets"] = _del(Budget)
 
-    db.flush()
+    db.commit()
+    if object_keys:
+        _purge_external_keys(object_keys)
     return {"mode": "partial", "deleted": deleted, "zeroed_accounts": zeroed_accounts}

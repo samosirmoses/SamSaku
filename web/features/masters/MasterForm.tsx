@@ -3,7 +3,7 @@ import { useState, type FormEvent } from "react";
 import { ArrowDownLeft, ArrowUpRight, Coins, Landmark, Smartphone, Trash2 } from "lucide-react";
 import { ErrorNote, Field } from "../../components/ui";
 import { del, patch, post } from "../../lib/api";
-import { type Account, type Data, formatDots, parseDigits, today } from "../../lib/domain";
+import { type Account, type Data, formatSignedDots, parseSignedDigits, today } from "../../lib/domain";
 
 const toErr = (e: unknown) => (e instanceof Error ? e.message : "Gagal menyimpan perubahan.");
 
@@ -27,9 +27,9 @@ export function MasterForm({
     const [accountKind, setAccountKind] = useState(account?.kind || "bank");
     const [accountNumber, setAccountNumber] = useState(account?.account_number || "");
     const [openingBalance, setOpeningBalance] = useState(
-        account?.opening_balance != null ? String(account.opening_balance) : "0"
+        account ? (account.opening_balance != null ? String(account.opening_balance) : "") : "0"
     );
-    const [openingDate, setOpeningDate] = useState(account?.opening_date || today());
+    const [openingDate, setOpeningDate] = useState(account ? account.opening_date || "" : today());
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [deleteMode, setDeleteMode] = useState<"transfer" | "cascade">("transfer");
     const otherAccounts = data.accounts.filter(a => a.id !== account?.id);
@@ -63,19 +63,40 @@ export function MasterForm({
                 });
             } else if (isEditAccount && account) {
                 const rawBal = openingBalance.trim();
-                const hasOpening = rawBal !== "" && openingDate.trim() !== "";
+                const rawDate = openingDate.trim();
+                if (rawBal === "-") {
+                    setError("Masukkan angka saldo awal yang valid.");
+                    setBusy(false);
+                    return;
+                }
+                if (rawBal !== "" && rawDate === "") {
+                    setError("Isi tanggal saldo awal bersama nominal saldo awal.");
+                    setBusy(false);
+                    return;
+                }
+                if (rawBal === "" && rawDate !== "") {
+                    setError("Isi nominal saldo awal atau kosongkan tanggal saldo awal.");
+                    setBusy(false);
+                    return;
+                }
+                const hasOpening = rawBal !== "" && rawDate !== "";
                 const cleanAccNo = accountNumber.replace(/[\s.\-]+/g, "").trim();
                 await patch("/accounts/" + account.id, {
                     code: cleanCode,
                     name: cleanName,
                     kind: accountKind,
                     account_number: cleanAccNo || null,
-                    opening_date: hasOpening ? openingDate : null,
-                    opening_balance: hasOpening ? parseDigits(rawBal) : null,
+                    opening_date: hasOpening ? rawDate : null,
+                    opening_balance: hasOpening ? parseSignedDigits(rawBal) : null,
                     clear_opening: !hasOpening,
                 });
             } else {
                 const rawBal = openingBalance.trim();
+                if (rawBal === "-") {
+                    setError("Masukkan angka saldo awal yang valid.");
+                    setBusy(false);
+                    return;
+                }
                 const hasOpening = rawBal !== "";
                 const cleanAccNo = accountNumber.replace(/[\s.\-]+/g, "").trim();
                 await post("/accounts", {
@@ -84,7 +105,7 @@ export function MasterForm({
                     kind: accountKind,
                     account_number: cleanAccNo || null,
                     opening_date: hasOpening ? openingDate || today() : null,
-                    opening_balance: hasOpening ? parseDigits(rawBal) : null,
+                    opening_balance: hasOpening ? parseSignedDigits(rawBal) : null,
                 });
             }
             onDone();
@@ -204,24 +225,47 @@ export function MasterForm({
                             <span className="currency-prefix">Rp</span>
                             <input
                                 type="text"
-                                inputMode="numeric"
+                                inputMode="text"
                                 aria-label="Saldo awal"
-                                value={formatDots(openingBalance)}
+                                value={formatSignedDots(openingBalance)}
                                 onChange={e => {
-                                    const raw = e.target.value.replace(/\D/g, "");
-                                    setOpeningBalance(raw);
-                                    if (raw && !openingDate) setOpeningDate(today());
+                                    const trimmed = e.target.value.trim();
+                                    const neg = trimmed.startsWith("-");
+                                    const digits = trimmed.replace(/\D/g, "");
+                                    const next = neg ? "-" + digits : digits;
+                                    setOpeningBalance(next);
+                                    if (digits && !openingDate) setOpeningDate(today());
                                 }}
-                                placeholder="0"
+                                placeholder="Kosongkan jika belum ada acuan"
                             />
                         </div>
                         <div className="quick-nominal-row">
+                            <button
+                                type="button"
+                                className="nominal-chip"
+                                title="Ubah tanda positif / negatif"
+                                onClick={() => {
+                                    const cur = openingBalance.trim();
+                                    if (!cur) {
+                                        setOpeningBalance("-");
+                                    } else if (cur.startsWith("-")) {
+                                        setOpeningBalance(cur.slice(1));
+                                    } else {
+                                        setOpeningBalance("-" + cur);
+                                    }
+                                }}
+                            >
+                                +/−
+                            </button>
                             {[0, 500000, 1000000, 5000000, 10000000].map(v => (
                                 <button
                                     key={v}
                                     type="button"
                                     className="nominal-chip"
-                                    onClick={() => setOpeningBalance(String(v))}
+                                    onClick={() => {
+                                        setOpeningBalance(String(v));
+                                        if (!openingDate) setOpeningDate(today());
+                                    }}
                                 >
                                     {v === 0 ? "Rp 0" : `+${v >= 1000000 ? v / 1000000 + "jt" : v / 1000 + "rb"}`}
                                 </button>

@@ -1,84 +1,16 @@
 "use client";
-import dynamic from "next/dynamic";
 import { useCallback, useEffect, useState } from "react";
 import { BottomNav, PageHeader, QuickFab, SidebarNav, Topbar } from "../components/layout/AppChrome";
+import { AppDialogs, type Dialog, type EntryPreset } from "../components/layout/AppDialogs";
+import { PageContent } from "../components/layout/PageContent";
 import type { Page } from "../components/layout/navigation";
 import { ErrorNote, Modal } from "../components/ui";
-import { DashboardView } from "../features/dashboard/DashboardView";
 import type { TxViewMode } from "../features/transactions/TransactionsView";
 import { useAuth } from "../hooks/useAuth";
 import { useLedgerData } from "../hooks/useLedgerData";
 import { type RealtimeSyncEvent, useRealtimeSync } from "../hooks/useRealtimeSync";
 import { useTheme } from "../hooks/useTheme";
-import {
-    type Account,
-    type Category,
-    type Review,
-    type Transaction,
-    cycleMonthForDate,
-    today,
-} from "../lib/domain";
-
-const LoadingCard = () => (
-    <div role="status" className="card loading">
-        Memuat tampilan…
-    </div>
-);
-
-// Lazy-load secondary pages & modals to keep initial bundle small on mobile and low-bandwidth connections
-const TransactionsView = dynamic(
-    () => import("../features/transactions/TransactionsView").then(m => m.TransactionsView),
-    { loading: LoadingCard }
-);
-const BudgetsView = dynamic(() => import("../features/budgets/BudgetsView").then(m => m.BudgetsView), {
-    loading: LoadingCard,
-});
-const StatisticsView = dynamic(() => import("../features/statistics/StatisticsView").then(m => m.StatisticsView), {
-    loading: LoadingCard,
-});
-const ReportsView = dynamic(() => import("../features/reports/ReportsView").then(m => m.ReportsView), {
-    loading: LoadingCard,
-});
-const ImporterView = dynamic(() => import("../features/importer/ImporterView").then(m => m.ImporterView), {
-    loading: LoadingCard,
-});
-const MastersView = dynamic(() => import("../features/masters/MastersView").then(m => m.MastersView), {
-    loading: LoadingCard,
-});
-const SettingsView = dynamic(() => import("../features/settings/SettingsView").then(m => m.SettingsView), {
-    loading: LoadingCard,
-});
-const ReviewsView = dynamic(() => import("../features/reviews/ReviewsView").then(m => m.ReviewsView), {
-    loading: LoadingCard,
-});
-const LoginModal = dynamic(() => import("../features/auth/LoginModal").then(m => m.LoginModal));
-const EntryForm = dynamic(() => import("../features/transactions/EntryForm").then(m => m.EntryForm));
-const TransactionDetailModal = dynamic(
-    () => import("../features/transactions/TransactionDetailModal").then(m => m.TransactionDetailModal)
-);
-const MasterForm = dynamic(() => import("../features/masters/MasterForm").then(m => m.MasterForm));
-const CategoryEdit = dynamic(() => import("../features/masters/CategoryEdit").then(m => m.CategoryEdit));
-const ReviewModal = dynamic(() => import("../features/reviews/ReviewModal").then(m => m.ReviewModal));
-
-type Dialog =
-    | "login"
-    | "entry"
-    | "edit-entry"
-    | "account"
-    | "edit-account"
-    | "category"
-    | "edit-category"
-    | "detail"
-    | "review"
-    | "receipt"
-    | null;
-
-type EntryPreset = {
-    date?: string;
-    kind?: Transaction["kind"];
-    account_id?: string;
-    autoScan?: boolean;
-};
+import type { Account, Category, Review, Transaction } from "../lib/domain";
 
 type ToastState = {
     text: string;
@@ -205,24 +137,6 @@ export default function SamSakuApp() {
         refresh();
     }
 
-    const dialogTitles: Record<Exclude<Dialog, null>, string> = {
-        login: "Koneksi Server & Akun",
-        entry:
-            entryPreset.kind === "transfer"
-                ? "Transfer Antar Dompet"
-                : entryPreset.kind === "income"
-                  ? "Catat Pemasukan"
-                  : "Catat Transaksi",
-        "edit-entry": "Ubah Transaksi",
-        account: "Tambah Dompet Baru",
-        "edit-account": "Ubah / Hapus Dompet",
-        category: "Buat Kategori Baru",
-        "edit-category": "Ubah / Hapus Kategori",
-        detail: "Detail Transaksi",
-        review: "Tinjau Bukti",
-        receipt: "Foto Struk (Auto-Fill)",
-    };
-
     const startDay = data?.settings?.monthly_start_day || 1;
     const reviewCount = data?.reviews?.length || 0;
 
@@ -303,187 +217,34 @@ export default function SamSakuApp() {
                     )}
 
                     {data && (
-                        <>
-                            {page === "home" && (
-                                <DashboardView
-                                    data={data}
-                                    month={month}
-                                    highlightIds={recentIds}
-                                    onCategory={name => {
-                                        nav("transactions");
-                                        setFilter(name);
-                                    }}
-                                    onTx={t => {
-                                        setSelectedTx(t);
-                                        openDialog("detail");
-                                    }}
-                                    onAccounts={() => nav("masters")}
-                                    onEditAccount={a => {
-                                        setSelectedAccount(a);
-                                        openDialog("edit-account");
-                                    }}
-                                    onAddAccount={() => {
-                                        setSelectedAccount(null);
-                                        openDialog("account");
-                                    }}
-                                    onFilterAccount={accId => {
-                                        nav("transactions");
-                                        setAccountFilter(accId);
-                                    }}
-                                    onNewTx={() => openEntry({ kind: "expense" })}
-                                    onTransfer={fromAccId => openEntry({ kind: "transfer", account_id: fromAccId })}
-                                    onBudgets={() => nav("budgets")}
-                                    onStats={() => nav("stats")}
-                                    onAll={() => nav("transactions")}
-                                    onSelectReview={r => {
-                                        setSelectedReview(r);
-                                        openDialog("review");
-                                    }}
-                                    onReview={() => nav("reviews")}
-                                    onReviewResolved={msg => {
-                                        refresh(true);
-                                        showToast(msg);
-                                    }}
-                                    onError={msg => setError(msg)}
-                                />
-                            )}
-
-                            {page === "transactions" && (
-                                <TransactionsView
-                                    data={data}
-                                    month={month}
-                                    view={txView}
-                                    setView={setTxView}
-                                    highlightIds={recentIds}
-                                    onPickMonth={m => pickMonth(m, true)}
-                                    filter={filter}
-                                    setFilter={setFilter}
-                                    accountFilter={accountFilter}
-                                    setAccountFilter={setAccountFilter}
-                                    search={search}
-                                    setSearch={setSearch}
-                                    onOpenTx={t => {
-                                        setSelectedTx(t);
-                                        openDialog("detail");
-                                    }}
-                                    onAddAtDate={(date, kind) => openEntry({ date, kind: kind || "expense" })}
-                                    onScanAtDate={date => openEntry({ date, kind: "expense", autoScan: true })}
-                                    onTransferAtDate={date => openEntry({ date, kind: "transfer" })}
-                                    onSelectReview={r => {
-                                        setSelectedReview(r);
-                                        openDialog("review");
-                                    }}
-                                    onOpenAllReviews={() => nav("reviews")}
-                                    onReviewResolved={msg => {
-                                        refresh(true);
-                                        showToast(msg);
-                                    }}
-                                    onError={msg => setError(msg)}
-                                />
-                            )}
-
-                            {page === "budgets" && (
-                                <BudgetsView
-                                    data={data}
-                                    month={month}
-                                    onSelectCategory={catName => {
-                                        nav("transactions");
-                                        setFilter(catName);
-                                    }}
-                                    onDone={() => {
-                                        refresh(true);
-                                        showToast("Anggaran diperbarui.");
-                                    }}
-                                />
-                            )}
-
-                            {page === "stats" && (
-                                <StatisticsView
-                                    data={data}
-                                    month={month}
-                                    onSelectCategory={catName => {
-                                        nav("transactions");
-                                        setFilter(catName);
-                                    }}
-                                />
-                            )}
-
-                            {page === "reports" && (
-                                <ReportsView
-                                    data={data}
-                                    month={month}
-                                    demoMode={demoMode}
-                                    setMonth={m => pickMonth(m, true)}
-                                />
-                            )}
-
-                            {page === "import" && (
-                                <ImporterView
-                                    data={data}
-                                    demoMode={demoMode}
-                                    onLogin={() => setDialog("login")}
-                                    onDone={() => refresh(true)}
-                                />
-                            )}
-
-                            {page === "masters" && (
-                                <MastersView
-                                    data={data}
-                                    onEditAccount={a => {
-                                        setSelectedAccount(a);
-                                        openDialog("edit-account");
-                                    }}
-                                    onAddAccount={() => {
-                                        setSelectedAccount(null);
-                                        openDialog("account");
-                                    }}
-                                    onTransfer={fromAccId => openEntry({ kind: "transfer", account_id: fromAccId })}
-                                    onFilterAccount={accId => {
-                                        nav("transactions");
-                                        setAccountFilter(accId);
-                                    }}
-                                    onAddCategory={() => openDialog("category")}
-                                    onEditCategory={c => {
-                                        setSelectedCategory(c);
-                                        openDialog("edit-category");
-                                    }}
-                                    onOpenImport={() => nav("import")}
-                                />
-                            )}
-
-                            {page === "settings" && (
-                                <SettingsView
-                                    data={data}
-                                    month={month}
-                                    demoMode={demoMode}
-                                    theme={theme}
-                                    onToggleTheme={applyTheme}
-                                    onDone={nextStartDay => {
-                                        if (typeof nextStartDay === "number") {
-                                            pickMonth(cycleMonthForDate(today(), nextStartDay), false);
-                                        }
-                                        refresh(true);
-                                        showToast("Pengaturan disimpan.");
-                                    }}
-                                />
-                            )}
-
-                            {page === "reviews" && (
-                                <ReviewsView
-                                    data={data}
-                                    reviews={data.reviews}
-                                    highlightIds={recentIds}
-                                    onSelect={r => {
-                                        setSelectedReview(r);
-                                        openDialog("review");
-                                    }}
-                                    onResolved={msg => {
-                                        refresh(true);
-                                        showToast(msg);
-                                    }}
-                                />
-                            )}
-                        </>
+                        <PageContent
+                            page={page}
+                            data={data}
+                            month={month}
+                            demoMode={demoMode}
+                            theme={theme}
+                            txView={txView}
+                            setTxView={setTxView}
+                            recentIds={recentIds}
+                            filter={filter}
+                            setFilter={setFilter}
+                            accountFilter={accountFilter}
+                            setAccountFilter={setAccountFilter}
+                            search={search}
+                            setSearch={setSearch}
+                            onNav={nav}
+                            onOpenDialog={openDialog}
+                            onOpenEntry={openEntry}
+                            onPickMonth={pickMonth}
+                            onRefresh={refresh}
+                            onShowToast={showToast}
+                            onError={setError}
+                            onToggleTheme={applyTheme}
+                            onSelectTx={setSelectedTx}
+                            onSelectReview={setSelectedReview}
+                            onSelectAccount={setSelectedAccount}
+                            onSelectCategory={setSelectedCategory}
+                        />
                     )}
                 </div>
             </main>
@@ -516,105 +277,27 @@ export default function SamSakuApp() {
                 </div>
             )}
 
-            {dialog && (
-                <Modal
-                    title={dialogTitles[dialog]}
-                    onClose={() => setDialog(null)}
-                    wide={["entry", "edit-entry", "receipt", "account", "edit-account"].includes(dialog)}
-                    key={dialog}
-                >
-                    {dialog === "login" && (
-                        <LoginModal
-                            authed={authed}
-                            onLogout={handleLogout}
-                            onConnected={() => {
-                                markConnected();
-                                setDialog(null);
-                                refresh();
-                            }}
-                        />
-                    )}
-
-                    {data && (
-                        <>
-                            {dialog === "entry" && (
-                                <EntryForm
-                                    data={data}
-                                    initial={{
-                                        date: entryPreset.date,
-                                        kind: entryPreset.kind,
-                                        account_id: entryPreset.account_id,
-                                    }}
-                                    autoScan={entryPreset.autoScan}
-                                    onSavedKeepOpen={() => refresh(true)}
-                                    onDone={() => finishMutation("Transaksi tersimpan.")}
-                                />
-                            )}
-
-                            {dialog === "edit-entry" && selectedTx && (
-                                <EntryForm
-                                    data={data}
-                                    tx={selectedTx}
-                                    onDone={() => finishMutation("Perubahan transaksi disimpan.")}
-                                />
-                            )}
-
-                            {dialog === "account" && (
-                                <MasterForm mode="account" data={data} onDone={() => finishMutation()} />
-                            )}
-
-                            {dialog === "edit-account" && selectedAccount && (
-                                <MasterForm
-                                    mode="account"
-                                    data={data}
-                                    account={selectedAccount}
-                                    onDone={() => finishMutation()}
-                                />
-                            )}
-
-                            {dialog === "category" && (
-                                <MasterForm mode="category" data={data} onDone={() => finishMutation()} />
-                            )}
-
-                            {dialog === "detail" && selectedTx && (
-                                <TransactionDetailModal
-                                    doc={selectedTx}
-                                    data={data}
-                                    onEdit={() => openDialog("edit-entry")}
-                                    onDeleted={() => finishMutation("Transaksi dihapus.")}
-                                    onError={msg => setError(msg)}
-                                />
-                            )}
-
-                            {dialog === "edit-category" && selectedCategory && (
-                                <CategoryEdit
-                                    category={selectedCategory}
-                                    categories={data.categories}
-                                    done={() => finishMutation()}
-                                />
-                            )}
-
-                            {dialog === "receipt" && (
-                                <EntryForm
-                                    data={data}
-                                    initial={{ date: entryPreset.date, kind: "expense" }}
-                                    autoScan={true}
-                                    onSavedKeepOpen={() => refresh(true)}
-                                    onDone={() => finishMutation("Transaksi tersimpan.")}
-                                />
-                            )}
-
-                            {dialog === "review" && selectedReview && (
-                                <ReviewModal
-                                    r={selectedReview}
-                                    data={data}
-                                    done={() => finishMutation("Bukti berhasil diproses.")}
-                                />
-                            )}
-                        </>
-                    )}
-                </Modal>
-            )}
+            <AppDialogs
+                dialog={dialog}
+                entryPreset={entryPreset}
+                authed={authed}
+                data={data}
+                selectedTx={selectedTx}
+                selectedAccount={selectedAccount}
+                selectedCategory={selectedCategory}
+                selectedReview={selectedReview}
+                onClose={() => setDialog(null)}
+                onOpenDialog={openDialog}
+                onFinishMutation={finishMutation}
+                onRefresh={refresh}
+                onConnected={() => {
+                    markConnected();
+                    setDialog(null);
+                    refresh();
+                }}
+                onLogout={handleLogout}
+                onError={setError}
+            />
         </div>
     );
 }

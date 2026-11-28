@@ -24,8 +24,8 @@ Semua endpoint aplikasi memakai awalan `/v1` (kecuali `/health`), mengembalikan 
 | Method | Path | Deskripsi |
 | --- | --- | --- |
 | `GET` | `/health` | Cek status server (`{"status": "ok"}`) |
-| `GET` | `/v1/bootstrap` | **Endpoint gabungan utama PWA.** Parameter opsional `month=YYYY-MM` atau `start` & `end`. Mengembalikan `month`, `settings`, `accounts`, `categories`, `transactions`, `reviews`, `budgets`, `summary`, `connections` dalam 1 request. |
-| `WS` | `/v1/ws` | WebSocket realtime (auth lewat pesan pertama `{"type":"auth", ...}` atau query param). Mendorong event `{"type":"sync","event":"..."}` saat ada mutasi. |
+| `GET` | `/v1/bootstrap` | **Endpoint gabungan utama PWA.** Parameter opsional `month=YYYY-MM` (bulan `01–12`, `422` jika tidak valid) atau `start` & `end`. Mengembalikan `month`, `settings`, `accounts`, `categories`, `transactions`, `reviews`, `budgets`, `goals`, `summary`, `connections` dalam 1 request dengan tanggal cutoff saldo dompet yang seragam (`today`). |
+| `WS` | `/v1/ws` | WebSocket realtime (auth wajib lewat pesan pertama `{"type":"auth", ...}`; token query parameter ditolak). Memvalidasi `Origin` bila `CORS_ORIGINS` eksplisit (`4403`), membatasi koneksi per pemilik & global (`4429`), dan mendorong event `{"type":"sync","event":"..."}` saat ada mutasi. |
 
 ### Dompet, Kategori & Transaksi
 | Method | Path | Deskripsi |
@@ -34,13 +34,13 @@ Semua endpoint aplikasi memakai awalan `/v1` (kecuali `/health`), mengembalikan 
 | `PATCH` / `DELETE` | `/v1/accounts/{key}` | Ubah dompet / hapus dompet (`?transfer_to=<id>` atau `?cascade=true`) |
 | `GET` / `POST` | `/v1/categories` | Daftar kategori / tambah kategori (mendukung `parent_id`) |
 | `PATCH` / `DELETE` | `/v1/categories/{key}` | Ubah kategori / hapus kategori (`?transfer_to=<id>`) |
-| `GET` / `POST` | `/v1/transactions` | Daftar transaksi periode (`start`, `end`) dengan serialisasi batch / catat transaksi baru |
+| `GET` / `POST` | `/v1/transactions` | Daftar transaksi periode (`start`, `end`) dengan serialisasi batch / catat transaksi baru (mendukung header `Idempotency-Key`, menolak replay berbeda dengan `409 Conflict`, dan menekan siaran WS ganda saat retry) |
 | `PUT` / `PATCH` / `DELETE` | `/v1/transactions/{key}` | Ubah atau hapus transaksi |
 
 ### Ringkasan, Anggaran & Pengaturan
 | Method | Path | Deskripsi |
 | --- | --- | --- |
-| `GET` | `/v1/summary` | Ringkasan arus kas, kategori pengeluaran/pemasukan, anggaran, periode pembanding, dan saldo per dompet |
+| `GET` | `/v1/summary` | Ringkasan arus kas, kategori pengeluaran/pemasukan, anggaran, `budget_alerts`, `pacing` siklus, `category_deltas`, periode pembanding, dan saldo per dompet |
 | `GET` / `POST` | `/v1/budgets` | Daftar progres anggaran periode / buat atau ubah anggaran kategori |
 | `DELETE` | `/v1/budgets/{key}` | Hapus anggaran |
 | `GET` / `PUT` | `/v1/settings` | Baca atau simpan `monthly_start_day`, `weekly_start_day`, `default_account_id` |
@@ -50,10 +50,10 @@ Semua endpoint aplikasi memakai awalan `/v1` (kecuali `/health`), mengembalikan 
 | Method | Path | Deskripsi |
 | --- | --- | --- |
 | `GET` | `/v1/reviews` | Daftar bukti berstatus `review` |
-| `POST` | `/v1/reviews/{key}/resolve` | Selesaikan bukti: `link`, `post`, atau `ignore` |
+| `POST` | `/v1/reviews/{key}/resolve` | Selesaikan bukti: `link`, `post`, atau `ignore` (`409 Conflict` jika replay berbeda setelah selesai) |
 | `GET` | `/v1/connections` | Waktu terakhir menerima bukti dari `bca`, `gopay`, `telegram` |
 | `POST` | `/v1/events/{source}` | Terima mutasi dari konektor (`bca`, `gopay`, `telegram`) |
-| `POST` | `/v1/webhooks/telegram` | Terima update pesan/foto/callback tombol inline Telegram |
+| `POST` | `/v1/webhooks/telegram` | Terima update pesan/foto/callback tombol inline Telegram (instant auto-save + tombol `[Ganti Kategori]`/`[Ganti Dompet]`/`[Hapus]`, dedup `update_id` & SHA-256 foto, atau antrean `review` bila ambigu/duplikat) |
 
 ### Impor Excel, Scan Struk AI & Laporan
 | Method | Path | Deskripsi |
@@ -63,16 +63,19 @@ Semua endpoint aplikasi memakai awalan `/v1` (kecuali `/health`), mengembalikan 
 | `GET` | `/v1/imports` & `/v1/imports/mappings` | Riwayat batch impor & pemetaan kolom tersimpan |
 | `GET` | `/v1/imports/{job_id}` & `/v1/imports/{job_id}/errors` | Status batch & ekspor CSV baris bermasalah |
 | `POST` | `/v1/imports/{job_id}/preview` | Pratinjau dampak impor (savepoint rollback, tidak mengubah buku kas) |
-| `POST` | `/v1/imports/{job_id}/commit` | Publikasi atomik batch yang sudah ditinjau |
+| `POST` | `/v1/imports/{job_id}/commit` | Publikasi atomik satu transaksi database batch yang sudah ditinjau (`409 Conflict` pada replay persetujuan berbeda) |
 | `POST` | `/v1/receipts/scan` | Scan struk & bukti transfer via **Gemini Vision AI** untuk auto-fill form (otomatis deteksi `expense`/`income`/`transfer`, dompet asal/tujuan, biaya admin, jenis transaksi, berita & kategori) |
-| `POST` | `/v1/receipts`, `/v1/receipts/{job_id}/process`, `/v1/receipts/{job_id}/confirm` | Alur unggah → proses AI → konfirmasi struk berbasis job |
-| `GET` | `/v1/reports/{format}` | Unduh laporan `csv` atau `pdf` (`start`, `end`, `details=true\|false`) — PDF dirender di subprocess terisolasi |
-| `POST` | `/v1/jobs/tick` | Bersihkan file sementara kedaluwarsa & lanjutkan job tertunda |
+| `POST` | `/v1/receipts`, `/v1/receipts/{job_id}/process`, `/v1/receipts/{job_id}/confirm` | Alur unggah → proses AI → konfirmasi struk berbasis job (`Evidence.status` konsisten `"posted"` vs `"linked"`, `409 Conflict` pada replay konfirmasi berbeda) |
+| `GET` | `/v1/reports/{format}` | Unduh laporan `csv` (dengan proteksi *formula injection*) atau `pdf` (`start`, `end`, `details=true\|false`) — PDF dirender di subprocess terisolasi dengan semaphore tunggal (`429` bila sibuk), batas rentang `<= 366` selisih hari, dan maks `500` baris rincian (`422`) |
+| `POST` | `/v1/jobs/tick` | Bersihkan file sementara kedaluwarsa, lanjutkan job tertunda, dan kirim rekap harian Telegram pukul 21:00 WIB (bila diaktifkan) |
 
-### Target & Skema Alokasi (Kompatibilitas API)
+### Target & Skema Alokasi
 | Method | Path | Deskripsi |
 | --- | --- | --- |
 | `GET` / `POST` | `/v1/goals` | Daftar target tabungan & total cadangan / buat target |
+| `DELETE` | `/v1/goals/{key}` | Hapus target tabungan (`204`, melepas relasi `Reserve.goal_id = NULL` secara aman) |
 | `GET` / `POST` | `/v1/schemes` | Daftar skema & pos cadangan (batch query) / buat skema |
 | `PUT` | `/v1/schemes/{key}` | Perbarui aturan skema |
 | `POST` | `/v1/schemes/{key}/preview` & `/apply` | Pratinjau & terapkan pembagian pemasukan ke pos cadangan |
+
+> **Rate Limiting (`/v1/*`):** Webhook Telegram & intake dibatasi per IP (`SAMSAKU_RATE_LIMIT_WEBHOOK_PER_MIN`, default `60/menit`), dan lonjakan kegagalan autentikasi `401`/`403` dibatasi sementara (`SAMSAKU_RATE_LIMIT_AUTH_FAIL_PER_MIN`, default `30/menit`), mengembalikan HTTP `429` dengan header `Retry-After`.
